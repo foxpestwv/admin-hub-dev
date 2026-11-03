@@ -454,7 +454,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.1.0";
+const APP_VERSION = "6.2.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -594,7 +594,12 @@ function estDefaults(){
   return Object.assign({warrantyDays:90, validDays:30, paymentTerms:"upon completion of the work", taxRate:0, notifyExtra:"",
     warrantyText:EST_DEFAULT_WARRANTY, termsText:EST_DEFAULT_TERMS}, d);
 }
-function estSettings(){ return Object.assign({}, estDefaults(), S._estSettings||{}); }
+function estSettings(){
+  var base = Object.assign({}, estDefaults(), S._estSettings||{}), t = S._estTerms || {};
+  // the warranty & terms are one company-wide copy set by Super Admin; it wins over anything saved per branch
+  EST_TERMS_KEYS.forEach(function(k){ if(t[k]!==undefined && t[k]!==null && t[k]!=="") base[k] = t[k]; });
+  return base;
+}
 function estUser(){
   var name = S.role==="manager" ? (S.managerName||"") : (S.currentTech||(S.currentUser&&S.currentUser.name)||S.managerName||"");
   var email = (S.currentUser&&S.currentUser.email)||"";
@@ -627,7 +632,8 @@ async function estEnsureLoaded(){
   if(S._estLoadedFor===b) return;
   S._estLoadedFor = b; S._estLoadError = null;
   try {
-    var r = await Promise.all([gs("getEstimateSettings",{branch:b}), gs("getEstimateItems",{branch:b}), gs("getEstimates",{branch:b})]);
+    var r = await Promise.all([gs("getEstimateSettings",{branch:b}), gs("getEstimateItems",{branch:b}), gs("getEstimates",{branch:b}), gs("getEstimateTerms",{})]);
+    S._estTerms = (r[3]&&r[3].terms)||{};
     S._estSettings = (r[0]&&r[0].settings)||{};
     S.estimateItems = (r[1]&&r[1].items)||[];
     S.estimates = (r[2]&&r[2].estimates)||[];
@@ -1033,13 +1039,13 @@ function estSettingsBody(){
   return "<h2 style='font-size:18px;font-weight:700;margin-bottom:4px;'>Estimate Settings</h2>"
     +"<p style='font-size:12px;color:#64748b;margin-bottom:12px;'>Company details and wording printed on every estimate for this branch.</p>"
     +f("es-company","Company name",st.companyName)+f("es-addr1","Address line 1",st.addr1)+f("es-addr2","City, State ZIP",st.addr2)+f("es-web","Website",st.website)+f("es-notify","Also email these addresses when an estimate is signed (optional, comma-separated)",st.notifyExtra)
-    +"<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;'>"+f("es-wdays","Warranty (days)",st.warrantyDays,"number")+f("es-vdays","Valid for (days)",st.validDays,"number")+f("es-tax","Default tax %",st.taxRate,"number")+"</div>"
-    +f("es-pay","Payment terms (finishes the sentence 'Payment is due ...')",st.paymentTerms)
-    +"<div style='"+lab+"'>Warranty wording</div><textarea class='inp' id='es-warranty' rows='9' style='margin-bottom:8px;'>"+esc(st.warrantyText)+"</textarea>"
-    +"<div style='"+lab+"'>Terms and conditions</div><textarea class='inp' id='es-terms' rows='12' style='margin-bottom:6px;'>"+esc(st.termsText)+"</textarea>"
-    +"<div style='font-size:11px;color:#64748b;margin-bottom:10px;'>You can use {warrantyDays}, {validDays} and {paymentTerms} in the wording and they fill in automatically.</div>"
-    +"<div style='display:flex;gap:8px;margin-bottom:18px;'><button class='btn bg' style='flex:1;padding:11px;' data-a='est-settings-reset'>Reset wording</button>"
-    +"<button class='btn bp' style='flex:2;padding:11px;' data-a='est-settings-save'>💾 Save Estimate Settings</button></div>"
+    +f("es-tax","Default tax %",st.taxRate,"number")
+    +"<button class='btn bp' style='width:100%;padding:11px;margin-bottom:20px;' data-a='est-settings-save'>💾 Save Estimate Settings</button>"
+    +"<div style='font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:4px;'>Warranty &amp; Terms (read-only)</div>"
+    +"<div style='font-size:11px;color:#64748b;margin-bottom:8px;'>This is exactly what prints on every estimate. The Super Admin sets it, and it is the same for every branch. Ask them if it needs to change.</div>"
+    +"<div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>Warranty: <b>"+esc(st.warrantyDays)+" days</b> · Estimate valid for: <b>"+(Number(st.validDays)>0 ? esc(st.validDays)+" days" : "no limit")+"</b> · Payment due: <b>"+esc(st.paymentTerms)+"</b></div>"
+    +estTermsPreviewHtml(st)
+    +"<div style='height:10px;'></div>"
     +"<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin-bottom:8px;'>Line Item Library</div>"
     +(libRows||"<div style='color:#64748b;font-size:12px;margin-bottom:8px;'>No saved items yet. Items you create on estimates are saved here automatically.</div>")
     +"<button class='btn bg' style='width:100%;padding:10px;' data-a='est-lib-add'>+ Add Library Item</button>";
@@ -1121,16 +1127,10 @@ async function estHandleAction(a, v){
     }
     case "est-settings-save": {
       function val(id){ var el = document.getElementById(id); return el ? el.value : ""; }
-      var ns = {companyName:val("es-company"), addr1:val("es-addr1"), addr2:val("es-addr2"), website:val("es-web"),
-        warrantyDays:Number(val("es-wdays"))||0, validDays:Number(val("es-vdays"))||0, taxRate:Number(val("es-tax"))||0,
-        paymentTerms:val("es-pay"), notifyExtra:val("es-notify"), warrantyText:val("es-warranty"), termsText:val("es-terms")};
+      // the warranty & terms are NOT part of this save: managers can't change them
+      var ns = {companyName:val("es-company"), addr1:val("es-addr1"), addr2:val("es-addr2"), website:val("es-web"), taxRate:Number(val("es-tax"))||0, notifyExtra:val("es-notify")};
       await gs("saveEstimateSettings",{branch:S.branch||"willamette", settings:ns});
-      S._estSettings = ns; showToast("Estimate settings saved ✓"); return true;
-    }
-    case "est-settings-reset": {
-      var w = document.getElementById("es-warranty"), t = document.getElementById("es-terms");
-      if(w) w.value = EST_DEFAULT_WARRANTY; if(t) t.value = EST_DEFAULT_TERMS;
-      showToast("Default wording restored - tap Save to keep it"); return true;
+      S._estSettings = Object.assign({}, S._estSettings||{}, ns); showToast("Estimate settings saved ✓"); return true;
     }
     case "est-lib-add": {
       var title = prompt("Library item title:"); if(!title || !title.trim()) return true;
@@ -2444,6 +2444,394 @@ async function estCleanupHandleAction(a){
   return false;
 }
 
+// ─── Company-wide warranty & terms: edited only by Super Admin, read-only for managers ───
+const EST_TERMS_KEYS = ["warrantyText", "termsText", "warrantyDays", "validDays", "paymentTerms"];
+function estTermsDraft(){
+  var t = S._tm || {}, base = estDefaults(), cur = S._estTerms || {};
+  var pick = function(k){ return (cur[k]!==undefined && cur[k]!==null && cur[k]!=="") ? cur[k] : base[k]; };
+  return {warrantyText:pick("warrantyText"), termsText:pick("termsText"), warrantyDays:pick("warrantyDays"), validDays:pick("validDays"), paymentTerms:pick("paymentTerms")};
+}
+function estTermsRead(){
+  var v = function(id){ var el = document.getElementById(id); return el ? el.value : ""; };
+  return {warrantyText:v("tm-warranty"), termsText:v("tm-terms"), warrantyDays:Number(v("tm-wdays"))||0, validDays:Number(v("tm-vdays"))||0, paymentTerms:v("tm-pay")};
+}
+function estTermsPreviewHtml(t){
+  var box = "max-height:200px;overflow:auto;white-space:pre-wrap;font-size:12px;color:#cbd5e1;background:#0a1628;border:1px solid #1e3a5f;border-radius:8px;padding:10px;margin-bottom:10px;";
+  return "<div style='font-size:11px;color:#64748b;margin-bottom:3px;'>Warranty</div><div style='"+box+"'>"+(esc(estFill(t.warrantyText, t)) || "<i style='color:#64748b;'>(blank - this section will not print)</i>")+"</div>"
+    +"<div style='font-size:11px;color:#64748b;margin-bottom:3px;'>Terms and Conditions</div><div style='"+box+"'>"+(esc(estFill(t.termsText, t)) || "<i style='color:#64748b;'>(blank - this section will not print)</i>")+"</div>";
+}
+async function saTermsOpen(){
+  if(S.role!=="superadmin") return;
+  S._saTool = "terms"; S._tm = {loaded:false};
+  renderSuperAdmin();
+  try { var r = await gs("getEstimateTerms", {}); S._estTerms = (r && r.terms) || {}; } catch(x){ S._estTerms = S._estTerms || {}; }
+  S._tm.loaded = true;
+  renderSuperAdmin();
+}
+function renderEstTerms(pg){
+  var tm = S._tm || {}, cur = S._estTerms || {}, d = estTermsDraft();
+  var lab = "font-size:11px;color:#64748b;margin-bottom:3px;";
+  var hist = (cur.history || []).slice().reverse();
+  pg.innerHTML = "<div style='padding:16px;max-width:640px;margin:0 auto;'>"
+    +"<button class='btn bg' data-a='sat-back' style='margin-bottom:12px;'>← Super Admin</button>"
+    +"<h2 style='font-size:20px;font-weight:700;margin-bottom:4px;'>Estimate Warranty &amp; Terms</h2>"
+    +"<div style='font-size:12px;color:#94a3b8;margin-bottom:12px;'>One set of wording for <b>every branch</b>. Managers can read it but not change it. Estimates that were already sent keep the wording they were sent with.</div>"
+    +(!tm.loaded ? "<div style='text-align:center;color:#64748b;padding:30px;'>Loading...</div>" :
+      (cur.updatedAt ? "<div style='font-size:11px;color:#64748b;margin-bottom:10px;'>Last changed "+esc(new Date(cur.updatedAt).toLocaleString("en-US"))+(cur.updatedBy?" by "+esc(cur.updatedBy):"")+"</div>" : "<div style='font-size:11px;color:#64748b;margin-bottom:10px;'>Currently using the built-in standard wording. Saving here replaces it for every branch.</div>")
+      +"<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;'>"
+      +"<div style='margin-bottom:8px;'><div style='"+lab+"'>Warranty (days)</div><input class='inp' id='tm-wdays' type='number' min='0' value='"+esc(d.warrantyDays)+"'></div>"
+      +"<div style='margin-bottom:8px;'><div style='"+lab+"'>Estimate valid for (days, 0 = no limit)</div><input class='inp' id='tm-vdays' type='number' min='0' value='"+esc(d.validDays)+"'></div></div>"
+      +"<div style='margin-bottom:10px;'><div style='"+lab+"'>Payment terms (finishes the sentence &quot;Payment is due ...&quot;)</div><input class='inp' id='tm-pay' value='"+esc(d.paymentTerms)+"'></div>"
+      +"<div style='"+lab+"'>Warranty wording</div><textarea class='inp' id='tm-warranty' rows='10' style='margin-bottom:8px;'>"+esc(d.warrantyText)+"</textarea>"
+      +"<div style='"+lab+"'>Terms and conditions</div><textarea class='inp' id='tm-terms' rows='14' style='margin-bottom:6px;'>"+esc(d.termsText)+"</textarea>"
+      +"<div style='font-size:11px;color:#64748b;margin-bottom:12px;'>Tip: <b>{warrantyDays}</b>, <b>{validDays}</b> and <b>{paymentTerms}</b> fill in automatically. Plain, short sentences read best - this prints on the estimate, and the full contract is signed separately.</div>"
+      +"<div style='display:flex;gap:8px;margin-bottom:14px;'>"
+      +"<button class='btn bg' style='flex:1;padding:11px;' data-a='sat-terms-default'>Use built-in wording</button>"
+      +"<button class='btn bp' style='flex:2;padding:11px;' data-a='sat-terms-save'>💾 Save for all branches</button></div>"
+      +(hist.length ? "<div style='"+lab+"'>Previous versions</div><div style='display:flex;gap:8px;margin-bottom:14px;'><select class='inp' id='tm-hist' style='flex:1;'>"
+          +hist.map(function(h,i){ return "<option value='"+i+"'>"+esc(new Date(h.savedAt).toLocaleString("en-US"))+(h.savedBy?" - "+esc(h.savedBy):"")+"</option>"; }).join("")
+          +"</select><button class='btn bg' style='padding:9px 14px;' data-a='sat-terms-version'>Load</button></div>"
+          +"<div style='font-size:11px;color:#64748b;margin:-8px 0 14px;'>Loading a version only fills the boxes above - nothing changes until you save.</div>" : "")
+      +"<div style='font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:6px;'>Preview - exactly what prints</div>"
+      +"<div id='tm-preview'>"+estTermsPreviewHtml(d)+"</div>")
+    +"</div>";
+}
+function estTermsBind(pg){
+  if(pg._tmBound) return; pg._tmBound = true;
+  pg.addEventListener("input", function(ev){
+    var el = ev.target;
+    if(el && el.id && el.id.indexOf("tm-")===0 && el.id!=="tm-hist"){ var p = document.getElementById("tm-preview"); if(p) p.innerHTML = estTermsPreviewHtml(estTermsRead()); }
+  });
+}
+function estTermsFill(t){
+  var set = function(id, v){ var el = document.getElementById(id); if(el) el.value = v; };
+  set("tm-warranty", t.warrantyText); set("tm-terms", t.termsText); set("tm-wdays", t.warrantyDays); set("tm-vdays", t.validDays); set("tm-pay", t.paymentTerms);
+  var p = document.getElementById("tm-preview"); if(p) p.innerHTML = estTermsPreviewHtml(estTermsRead());
+}
+async function saTermsSave(){
+  if(S.role!=="superadmin") return;
+  var t = estTermsRead();
+  if(!String(t.warrantyText).trim() || !String(t.termsText).trim()){
+    if(!confirm("One of the sections is blank, so it will not print on estimates.\n\nSave anyway?")) return;
+  }
+  if(!confirm("Save this wording for EVERY branch?\n\nNew estimates will use it. Estimates already sent keep the wording they went out with.")) return;
+  var r = await gs("saveEstimateTerms", {terms:t, by:"Super Admin"});
+  if(r && r.ok){
+    var fresh = await gs("getEstimateTerms", {});
+    S._estTerms = (fresh && fresh.terms) || t;
+    showToast("Saved for all branches ✓"); renderSuperAdmin();
+  } else { alert("Could not save: "+((r && r.error) || "no reply")); }
+}
+
+// ─── Super Admin PIN: changeable, stored as a salted hash (not written in the app's code) ───
+// Until it is changed, the original PIN in SUPER_ADMIN_PIN keeps working. Once changed, only the new one works.
+var _adminBusy = false, _adminFails = 0, _adminLockedUntil = 0;
+async function saPbkdf2(pin, saltB64){
+  var enc = new TextEncoder(), salt = Uint8Array.from(atob(saltB64), function(ch){ return ch.charCodeAt(0); });
+  var key = await crypto.subtle.importKey("raw", enc.encode(String(pin)), "PBKDF2", false, ["deriveBits"]);
+  var bits = await crypto.subtle.deriveBits({name:"PBKDF2", salt:salt, iterations:150000, hash:"SHA-256"}, key, 256);
+  return btoa(String.fromCharCode.apply(null, new Uint8Array(bits)));
+}
+function saNewSalt(){ var a = new Uint8Array(16); crypto.getRandomValues(a); return btoa(String.fromCharCode.apply(null, a)); }
+async function saLoadPinRecord(){ await initFirebase(); return await fbGet("config", "superAdmin"); }
+// {ok:true|false, reason:"offline"} - if the saved PIN can't be read, nobody gets in (the old PIN is NOT used as a fallback)
+async function saVerifyPin(pin){
+  var rec;
+  try { rec = await saLoadPinRecord(); } catch(err){ return {ok:false, reason:"offline"}; }
+  if(rec && rec.hash && rec.salt){ return {ok: (await saPbkdf2(pin, rec.salt))===rec.hash, custom:true}; }
+  return {ok: String(pin)===SUPER_ADMIN_PIN, custom:false};
+}
+function saPinProblem(p, current){
+  if(!/^\d{6}$/.test(p)) return "The PIN must be exactly 6 digits.";
+  if(p===SUPER_ADMIN_PIN) return "That is the original PIN, which is written in the app's code. Choose a different one.";
+  if(p===current) return "That is already your PIN.";
+  if(/^(\d)\1{5}$/.test(p)) return "Don't use the same digit six times.";
+  if("0123456789".indexOf(p)>=0 || "9876543210".indexOf(p)>=0) return "Don't use a straight run of numbers (like 123456).";
+  if(/^(\d\d)\1\1$/.test(p) || /^(\d\d\d)\1$/.test(p)) return "Avoid repeating patterns (like 121212 or 123123).";
+  return "";
+}
+function saLocked(){
+  if(_adminLockedUntil && Date.now() < _adminLockedUntil) return Math.ceil((_adminLockedUntil - Date.now())/1000);
+  return 0;
+}
+function saRegisterFail(){
+  _adminFails++;
+  if(_adminFails>=5){ _adminFails = 0; _adminLockedUntil = Date.now() + 60000; return true; }
+  return false;
+}
+async function saPinOpen(){
+  if(S.role!=="superadmin") return;
+  S._saTool = "pin"; S._pin = {loaded:false, custom:false, changedAt:""};
+  renderSuperAdmin();
+  try { var rec = await saLoadPinRecord(); S._pin = {loaded:true, custom:!!(rec && rec.hash), changedAt:(rec && rec.changedAt)||""}; }
+  catch(x){ S._pin = {loaded:true, custom:false, changedAt:"", error:"Couldn't read the saved PIN right now."}; }
+  renderSuperAdmin();
+}
+function renderSaPin(pg){
+  var p = S._pin || {}, lab = "font-size:11px;color:#64748b;margin-bottom:3px;";
+  var field = function(id, label){ return "<div style='margin-bottom:10px;'><div style='"+lab+"'>"+label+"</div><input class='inp' id='"+id+"' type='password' inputmode='numeric' maxlength='6' autocomplete='off' placeholder='6 digits'></div>"; };
+  pg.innerHTML = "<div style='padding:16px;max-width:520px;margin:0 auto;'>"
+    +"<button class='btn bg' data-a='sat-back' style='margin-bottom:12px;'>← Super Admin</button>"
+    +"<h2 style='font-size:20px;font-weight:700;margin-bottom:6px;'>Change Super Admin PIN</h2>"
+    +(!p.loaded ? "<div style='color:#64748b;padding:20px;text-align:center;'>Loading...</div>" :
+      "<div style='font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:14px;"+(p.custom?"background:#14532d;color:#bbf7d0;":"background:#7f1d1d;color:#fecaca;")+"'>"
+        +(p.custom ? "You are using a custom PIN"+(p.changedAt?" (changed "+esc(new Date(p.changedAt).toLocaleDateString("en-US"))+")":"")+"." : "You are still using the original PIN. It is written in the app's code, so please change it.")+"</div>"
+      +(p.error ? "<div style='font-size:12px;color:#fb923c;margin-bottom:10px;'>"+esc(p.error)+"</div>" : "")
+      +field("pin-old","Current PIN")+field("pin-new","New PIN (6 digits)")+field("pin-new2","Confirm new PIN")
+      +"<button class='btn bp' data-a='sat-pin-change' style='width:100%;padding:12px;margin-bottom:14px;'>Change PIN</button>"
+      +"<div style='font-size:11px;color:#64748b;line-height:1.5;'>This database ("+(isDevCopy()?"test":"live")+") has its own Super Admin PIN. "
+      +"If you ever forget it, open the Firebase console, go to Firestore &rarr; <b>config</b>, and delete the document named <b>superAdmin</b>. The original PIN works again and you can set a new one.</div>")
+    +"</div>";
+}
+async function saPinChange(){
+  if(S.role!=="superadmin") return;
+  var v = function(id){ var el = document.getElementById(id); return el ? String(el.value||"") : ""; };
+  var cur = v("pin-old"), np = v("pin-new"), np2 = v("pin-new2");
+  var wait = saLocked(); if(wait){ alert("Too many wrong tries. Wait "+wait+" seconds."); return; }
+  if(!/^\d{6}$/.test(cur)){ alert("Enter your current 6-digit PIN."); return; }
+  var prob = saPinProblem(np, cur); if(prob){ alert(prob); return; }
+  if(np!==np2){ alert("The two new PINs don't match."); return; }
+  var ok = await saVerifyPin(cur);
+  if(ok.reason==="offline"){ alert("Couldn't check your current PIN right now. Check your connection and try again."); return; }
+  if(!ok.ok){ var locked = saRegisterFail(); alert(locked ? "Too many wrong tries. Wait 60 seconds." : "Your current PIN is not correct."); return; }
+  _adminFails = 0;
+  var salt = saNewSalt(), hash = await saPbkdf2(np, salt);
+  await fbSet("config", "superAdmin", {hash:hash, salt:salt, algo:"pbkdf2-sha256-150000", changedAt:new Date().toISOString()});
+  showToast("Super Admin PIN changed ✓");
+  S._pin = {loaded:true, custom:true, changedAt:new Date().toISOString()};
+  renderSuperAdmin();
+}
+
+// ─── Backups: a dated file in a private Drive folder, plus a Restore tool that never deletes anything ───
+const BACKUP_COLLECTIONS = ["config","branches","products","estimates","estimateItems","estimateTokens","orderHistory","pendingOrders","restockOrders","checkouts","inspections","truckInventory","adjustmentLog","oooForms","qaForms","raForms","signRequests","signatureSigs","guestTokens"];
+// never backed up or restored: the PIN, the version record, and the backup record itself
+const BACKUP_SKIP_DOCS = {"config/superAdmin":1, "config/appVersion":1, "config/backupInfo":1};
+const BACKUP_BIG = 120000, BACKUP_OMIT = "[omitted: too large]";
+function bkStrip(v){
+  if(typeof v==="string") return v.length>BACKUP_BIG ? BACKUP_OMIT : v;
+  if(Array.isArray(v)) return v.map(bkStrip);
+  if(v && typeof v==="object"){ var o = {}; Object.keys(v).forEach(function(k){ o[k] = bkStrip(v[k]); }); return o; }
+  return v;
+}
+// what goes back into the database: omitted placeholders are dropped so they can never overwrite the real data
+function bkClean(v){
+  if(v===BACKUP_OMIT) return undefined;
+  if(Array.isArray(v)) return v.map(bkClean).filter(function(x){ return x!==undefined; });
+  if(v && typeof v==="object"){ var o = {}; Object.keys(v).forEach(function(k){ var c = bkClean(v[k]); if(c!==undefined) o[k] = c; }); return o; }
+  return v;
+}
+async function bkCollect(onProgress){
+  await initFirebase();
+  var cols = {}, counts = {}, total = 0;
+  for(var i=0;i<BACKUP_COLLECTIONS.length;i++){
+    var name = BACKUP_COLLECTIONS[i];
+    if(onProgress) onProgress(name, i, BACKUP_COLLECTIONS.length);
+    var snap = await _db.collection(name).get(), docs = {}, n = 0;
+    snap.docs.forEach(function(d){ if(BACKUP_SKIP_DOCS[name+"/"+d.id]) return; docs[d.id] = bkStrip(d.data()); n++; });
+    cols[name] = docs; counts[name] = n; total += n;
+  }
+  var cfg = firebaseConfigInUse();
+  return {format:"fox-admin-hub-backup", formatVersion:1, appVersion:APP_VERSION, createdAt:new Date().toISOString(),
+    database:cfg ? cfg.projectId : "", testDatabase:isDevCopy(), counts:counts, total:total, collections:cols};
+}
+function bkFileName(label){
+  var d = new Date(), p = function(n){ return ("0"+n).slice(-2); };
+  return "Fox Backup "+d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+"-"+p(d.getMinutes())+(label?" ("+label+")":"")+(isDevCopy()?" TEST":"")+".json";
+}
+function bkDownload(json, name){
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([json], {type:"application/json"})); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ try { URL.revokeObjectURL(a.href); a.remove(); } catch(x){} }, 1500);
+}
+async function bkRunBackup(opts){
+  opts = opts || {};
+  var b = await bkCollect(opts.onProgress), json = JSON.stringify(b), name = bkFileName(opts.label);
+  var res = await estBridge("saveBackup", {fileName:name, json:json});
+  if(!res || !res.ok) throw new Error((res && res.error) || "The bridge did not save the backup");
+  await fbSet("config", "backupInfo", {at:b.createdAt, fileName:name, url:res.url||"", size:json.length, total:b.total, label:opts.label||"", database:b.database});
+  if(opts.download) bkDownload(json, name);
+  return {backup:b, size:json.length, drive:res, name:name};
+}
+function bkParse(text){
+  var b; try { b = JSON.parse(text); } catch(x){ throw new Error("That file isn't a readable backup."); }
+  if(!b || b.format!=="fox-admin-hub-backup" || !b.collections) throw new Error("That file isn't a Fox Admin Hub backup.");
+  return b;
+}
+// Restore NEVER deletes. mode "missing": only records that no longer exist. mode "overwrite": the backup's version of every record.
+async function bkRestore(backup, cols, mode, onProgress){
+  await initFirebase();
+  var results = {};
+  for(var i=0;i<cols.length;i++){
+    var col = cols[i], docs = backup.collections[col] || {}, ids = Object.keys(docs).filter(function(id){ return !BACKUP_SKIP_DOCS[col+"/"+id]; });
+    if(onProgress) onProgress(col, i, cols.length);
+    var existing = {};
+    if(mode==="missing"){ var snap = await _db.collection(col).get(); snap.docs.forEach(function(d){ existing[d.id] = true; }); }
+    var todo = ids.filter(function(id){ return mode==="overwrite" || !existing[id]; });
+    for(var j=0;j<todo.length;j+=400){
+      var batch = _db.batch();
+      todo.slice(j, j+400).forEach(function(id){ batch.set(_db.collection(col).doc(id), bkClean(docs[id]), {merge:true}); });
+      await batch.commit();
+    }
+    results[col] = {restored:todo.length, skipped:ids.length-todo.length};
+  }
+  return results;
+}
+function bkAgeText(iso){
+  if(!iso) return "never";
+  var days = Math.floor((Date.now() - new Date(iso).getTime())/86400000);
+  return days<=0 ? "today" : days===1 ? "yesterday" : days+" days ago";
+}
+function bkSetStatus(msg){ var el = document.getElementById("bk-progress"); if(el) el.textContent = msg||""; }
+async function saBackupsOpen(){
+  if(S.role!=="superadmin") return;
+  S._saTool = "backups"; S._bk = {loaded:false, info:null, list:[], listError:"", restore:null, download:false};
+  var pg = document.getElementById("pg-dashboard"); if(pg) bkBind(pg);
+  renderSuperAdmin();
+  try { S._bk.info = await fbGet("config", "backupInfo"); } catch(x){}
+  S._bk.loaded = true; renderSuperAdmin();
+  await bkLoadList();
+}
+async function bkLoadList(){
+  var k = S._bk; if(!k) return;
+  try {
+    var r = await estBridge("listBackups", {});
+    if(r && r.ok){ k.list = r.files || []; k.listError = ""; } else { k.listError = (r && r.error) || "The bridge didn't answer."; }
+  } catch(err){ k.listError = err.message; }
+  if(S._saTool==="backups") renderSuperAdmin();
+}
+function renderBackups(pg){
+  var k = S._bk || {}, info = k.info, lab = "font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;margin:16px 0 6px;";
+  var stale = !info || !info.at || (Date.now() - new Date(info.at).getTime()) > 7*86400000;
+  var rs = k.restore;
+  pg.innerHTML = "<div style='padding:16px;max-width:640px;margin:0 auto;'>"
+    +"<button class='btn bg' data-a='sat-back' style='margin-bottom:12px;'>← Super Admin</button>"
+    +"<h2 style='font-size:20px;font-weight:700;margin-bottom:4px;'>Backups</h2>"
+    +"<div style='font-size:12px;margin-bottom:12px;padding:8px 10px;border-radius:8px;"+(isDevCopy()?"background:#14532d;color:#bbf7d0;":"background:#1e3a8a;color:#dbeafe;")+"'>"
+      +(isDevCopy()?"TEST database - backups go to the \"(TEST)\" Drive folder.":"LIVE database - backups go to the private \"Fox Admin Hub Backups\" folder in Drive.")+"</div>"
+    +"<div style='font-size:13px;margin-bottom:10px;"+(stale?"color:#fb923c;":"color:#94a3b8;")+"'>Last backup: <b>"+esc(info && info.at ? bkAgeText(info.at)+" ("+new Date(info.at).toLocaleString("en-US")+")" : "never")+"</b>"+(stale?" - it's time for a new one.":"")+"</div>"
+    +"<button class='btn bp' data-a='sat-backup-now' style='width:100%;padding:13px;margin-bottom:8px;'>💾 Back up now</button>"
+    +"<label style='display:flex;align-items:center;gap:8px;font-size:13px;color:#cbd5e1;margin-bottom:6px;'><input type='checkbox' data-bk='download' "+(k.download?"checked ":"")+"style='width:18px;height:18px;'> Also download a copy to this device</label>"
+    +"<div id='bk-progress' style='font-size:12px;color:#60a5fa;min-height:16px;'></div>"
+    +"<div style='"+lab+"'>Backups in Drive (newest 30 are kept)</div>"
+    +(!k.loaded ? "<div style='color:#64748b;padding:10px;'>Loading...</div>" :
+      k.listError ? "<div style='font-size:12px;color:#fb923c;padding:8px 0;'>Couldn't list the backups: "+esc(k.listError)+"</div>" :
+      (k.list.length ? "<div class='card' style='padding:0;overflow:hidden;'>"+k.list.map(function(f){
+          return "<div style='display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid #1e3a5f;'>"
+            +"<div style='flex:1;min-width:0;'><div style='font-size:13px;font-weight:600;word-break:break-word;'>"+esc(f.name)+"</div><div style='font-size:11px;color:#64748b;'>"+esc(new Date(f.created).toLocaleString("en-US"))+" · "+esc(Math.max(1, Math.round((f.size||0)/1024)))+" KB</div></div>"
+            +"<button class='btn bg' style='padding:6px 12px;font-size:12px;flex:none;' data-a='sat-restore-drive' data-v='"+esc(f.id)+"'>Restore…</button></div>";
+        }).join("")+"</div>" : "<div style='font-size:12px;color:#64748b;padding:8px 0;'>No backups yet. Tap Back up now.</div>"))
+    +"<div style='"+lab+"'>Restore from a file on this device</div>"
+    +"<label class='btn bg' style='display:block;text-align:center;padding:11px;cursor:pointer;'>Choose a backup file…<input type='file' accept='.json,application/json' data-bk='file' style='display:none;'></label>"
+    +(rs ? bkRestorePanelHtml(rs) : "")
+    +"</div>";
+}
+function bkRestorePanelHtml(rs){
+  var b = rs.backup, here = firebaseConfigInUse(), mismatch = b.database && here && b.database!==here.projectId;
+  var cols = Object.keys(b.collections).filter(function(c){ return Object.keys(b.collections[c]||{}).length>0 || true; });
+  return "<div class='card' style='padding:14px;margin-top:14px;border:1px solid #f59e0b55;'>"
+    +"<div style='font-weight:700;margin-bottom:4px;'>Restore: "+esc(rs.name||"backup")+"</div>"
+    +"<div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>Made "+esc(new Date(b.createdAt).toLocaleString("en-US"))+" · "+esc(b.total)+" records · from the "+(b.testDatabase?"TEST":"LIVE")+" database ("+esc(b.database||"unknown")+")</div>"
+    +(mismatch ? "<div style='font-size:12px;padding:8px 10px;border-radius:8px;background:#7f1d1d;color:#fecaca;margin-bottom:10px;'>This backup is from a DIFFERENT database than the one you are in now ("+esc(here.projectId)+"). Check this is what you want.</div>" : "")
+    +"<div style='font-size:12px;color:#64748b;margin-bottom:6px;'>Choose what to restore:</div>"
+    +cols.map(function(c){ var n = Object.keys(b.collections[c]||{}).length;
+        return "<label style='display:flex;align-items:center;gap:8px;font-size:13px;padding:4px 0;'><input type='checkbox' data-bkcol='"+esc(c)+"' "+(rs.selected[c]?"checked ":"")+(n?"":"disabled ")+"style='width:18px;height:18px;'> "+esc(c)+" <span style='color:#64748b;'>("+n+")</span></label>"; }).join("")
+    +"<div style='font-size:12px;color:#64748b;margin:10px 0 4px;'>How:</div>"
+    +"<label style='display:flex;gap:8px;font-size:13px;padding:3px 0;'><input type='radio' name='bkmode' data-bkmode='missing' "+(rs.mode==="missing"?"checked ":"")+"> <span><b>Add back what's missing</b> (safest) - records that still exist are left alone</span></label>"
+    +"<label style='display:flex;gap:8px;font-size:13px;padding:3px 0;'><input type='radio' name='bkmode' data-bkmode='overwrite' "+(rs.mode==="overwrite"?"checked ":"")+"> <span><b>Overwrite with the backup's version</b> - records go back to how they were then</span></label>"
+    +"<div style='font-size:11px;color:#64748b;margin:8px 0;'>Nothing is ever deleted. A safety backup of the current data is taken first.</div>"
+    +"<div style='display:flex;gap:8px;'><button class='btn bg' style='flex:1;padding:11px;' data-a='sat-restore-cancel'>Cancel</button>"
+    +"<button class='btn bd' style='flex:2;padding:11px;' data-a='sat-restore-run'>Restore selected</button></div></div>";
+}
+function bkOpenRestore(backup, name){
+  var sel = {}; Object.keys(backup.collections).forEach(function(c){ sel[c] = Object.keys(backup.collections[c]||{}).length>0; });
+  S._bk.restore = {backup:backup, name:name, selected:sel, mode:"missing"};
+  renderSuperAdmin();
+}
+async function bkRestoreRun(){
+  var rs = S._bk && S._bk.restore; if(!rs || S.role!=="superadmin") return;
+  var cols = Object.keys(rs.selected).filter(function(c){ return rs.selected[c]; });
+  if(!cols.length){ showToast("Tick what you want to restore first"); return; }
+  var here = firebaseConfigInUse(), b = rs.backup;
+  if(b.database && here && b.database!==here.projectId && !confirm("This backup came from a DIFFERENT database ("+b.database+"). You are restoring into "+here.projectId+".\n\nContinue?")) return;
+  var n = cols.reduce(function(t,c){ return t + Object.keys(b.collections[c]||{}).length; }, 0);
+  if(!confirm("Restore "+n+" records from "+cols.length+" collection"+(cols.length===1?"":"s")+"?\n\nMode: "+(rs.mode==="missing" ? "add back what's missing only" : "OVERWRITE with the backup's version")+"\nNothing will be deleted.\n\nThis is the "+(isDevCopy()?"TEST":"LIVE")+" database.")) return;
+  var typed = prompt("Type RESTORE to confirm:");
+  if(String(typed||"").trim()!=="RESTORE"){ showToast("Cancelled - nothing was restored"); return; }
+  bkSetStatus("Taking a safety backup first...");
+  try { await bkRunBackup({label:"before restore"}); }
+  catch(err){ if(!confirm("The safety backup failed ("+err.message+").\n\nRestore anyway, without a safety backup?")){ bkSetStatus(""); return; } }
+  bkSetStatus("Restoring...");
+  var res = await bkRestore(b, cols, rs.mode, function(c, i, t){ bkSetStatus("Restoring "+c+" ("+(i+1)+" of "+t+")..."); });
+  bkSetStatus("");
+  S._bk.restore = null; renderSuperAdmin();
+  alert("Restore finished.\n\n"+Object.keys(res).map(function(c){ return "  "+c+": "+res[c].restored+" restored"+(res[c].skipped?", "+res[c].skipped+" left as they were":""); }).join("\n")+"\n\nA safety backup of the data from before the restore was saved too.");
+}
+function bkBind(pg){
+  if(pg._bkBound) return; pg._bkBound = true;
+  pg.addEventListener("change", function(ev){
+    var el = ev.target; if(!el || !el.dataset || !S._bk) return;
+    if(el.dataset.bk==="download"){ S._bk.download = !!el.checked; }
+    else if(el.dataset.bk==="file"){
+      var f = el.files && el.files[0]; if(!f) return;
+      var rd = new FileReader();
+      rd.onload = function(){ try { bkOpenRestore(bkParse(String(rd.result)), f.name); } catch(err){ alert(err.message); } };
+      rd.readAsText(f); try { el.value = ""; } catch(x){}
+    }
+    else if(el.dataset.bkcol!==undefined && S._bk.restore){ S._bk.restore.selected[el.dataset.bkcol] = !!el.checked; }
+    else if(el.dataset.bkmode && S._bk.restore){ S._bk.restore.mode = el.dataset.bkmode; }
+  });
+}
+async function bkBackupNow(){
+  if(S.role!=="superadmin" || !S._bk) return;
+  bkSetStatus("Reading your data...");
+  try {
+    var r = await bkRunBackup({download:S._bk.download, onProgress:function(c, i, t){ bkSetStatus("Reading "+c+" ("+(i+1)+" of "+t+")..."); }});
+    S._bk.info = {at:r.backup.createdAt, fileName:r.name}; bkSetStatus("");
+    alert("Backup saved.\n\n"+r.name+"\n"+r.backup.total+" records, "+Math.max(1, Math.round(r.size/1024))+" KB"+(r.drive.trashedOld ? "\n"+r.drive.trashedOld+" older backup"+(r.drive.trashedOld===1?"":"s")+" moved to the Drive trash (only the newest 30 are kept)." : ""));
+    renderSuperAdmin(); await bkLoadList();
+  } catch(err){ bkSetStatus(""); alert("The backup didn't finish: "+err.message); }
+}
+async function bkRestoreFromDrive(fileId){
+  if(!S._bk) return;
+  bkSetStatus("Loading that backup...");
+  try {
+    var r = await estBridge("getBackup", {fileId:fileId});
+    if(!r || !r.ok) throw new Error((r && r.error) || "The bridge didn't return the file");
+    bkSetStatus(""); bkOpenRestore(bkParse(r.json), r.name);
+  } catch(err){ bkSetStatus(""); alert("Couldn't open that backup: "+err.message); }
+}
+// shows "last backup" under the console buttons
+async function bkConsoleStatus(){
+  var el = document.getElementById("bk-status"); if(!el) return;
+  try {
+    var info = await fbGet("config", "backupInfo"); el = document.getElementById("bk-status"); if(!el) return;
+    var stale = !info || !info.at || (Date.now() - new Date(info.at).getTime()) > 7*86400000;
+    el.style.color = stale ? "#fb923c" : "#64748b";
+    el.textContent = "Last backup: "+(info && info.at ? bkAgeText(info.at) : "never")+(stale ? " - time to back up" : "");
+  } catch(x){}
+}
+
+async function saToolAction(a, v){
+  if(S.role!=="superadmin") return false;
+  switch(a){
+    case "sat-back": S._saTool = null; renderSuperAdmin(); return true;
+    case "sat-terms-save": await saTermsSave(); return true;
+    case "sat-terms-default": { var d = estDefaults(); estTermsFill({warrantyText:d.warrantyText, termsText:d.termsText, warrantyDays:d.warrantyDays, validDays:d.validDays, paymentTerms:d.paymentTerms}); showToast("Built-in wording loaded - tap Save to keep it"); return true; }
+    case "sat-terms-version": {
+      var sel = document.getElementById("tm-hist"), hist = ((S._estTerms||{}).history||[]).slice().reverse(), h = hist[sel ? parseInt(sel.value,10) : 0];
+      if(h){ estTermsFill({warrantyText:h.warrantyText||"", termsText:h.termsText||"", warrantyDays:h.warrantyDays||0, validDays:h.validDays||0, paymentTerms:h.paymentTerms||""}); showToast("Version loaded - tap Save to keep it"); }
+      return true;
+    }
+    case "sat-pin-change": await saPinChange(); return true;
+    case "sat-backup-now": await bkBackupNow(); return true;
+    case "sat-restore-drive": await bkRestoreFromDrive(v); return true;
+    case "sat-restore-cancel": if(S._bk) S._bk.restore = null; renderSuperAdmin(); return true;
+    case "sat-restore-run": await bkRestoreRun(); return true;
+  }
+  return false;
+}
+
 function msMakeTransparent(dataUrl){
   return new Promise(function(resolve){
     try {
@@ -2978,6 +3366,27 @@ async function gs(fn, data){
         var rcLeft = ((await fbGet("estimates")) || []).filter(function(x){ return x.branch===rcBranch; });
         if(rcLeft.length) return {ok:false, error:"This branch still has "+rcLeft.length+" estimate"+(rcLeft.length===1?"":"s")+". Delete them all first - resetting now could create duplicate numbers."};
         await fbSet("config", "estimateCounter_"+rcBranch, {next:1001});
+        return {ok:true};
+      }
+      case "getEstimateTerms": {
+        var etDoc = await fbGet("config", "estimateTerms");
+        return {terms: etDoc || {}};
+      }
+      case "saveEstimateTerms": {
+        // One company-wide copy. The previous wording is kept (last 20 versions) so a mistake can be undone.
+        var etNew = data && data.terms;
+        if(!etNew) return {ok:false, error:"Missing wording"};
+        var etOld = (await fbGet("config", "estimateTerms")) || {};
+        var etHist = Array.isArray(etOld.history) ? etOld.history.slice() : [];
+        if(etOld.warrantyText || etOld.termsText){
+          etHist.push({savedAt:etOld.updatedAt||"", savedBy:etOld.updatedBy||"", warrantyText:etOld.warrantyText||"", termsText:etOld.termsText||"",
+            warrantyDays:etOld.warrantyDays, validDays:etOld.validDays, paymentTerms:etOld.paymentTerms||""});
+        }
+        etHist = etHist.slice(-20);
+        await fbSet("config", "estimateTerms", {
+          warrantyText:String(etNew.warrantyText||""), termsText:String(etNew.termsText||""),
+          warrantyDays:Number(etNew.warrantyDays)||0, validDays:Number(etNew.validDays)||0, paymentTerms:String(etNew.paymentTerms||""),
+          updatedAt:new Date().toISOString(), updatedBy:(data && data.by)||"", history:etHist});
         return {ok:true};
       }
       case "getAccounts": {
@@ -4393,7 +4802,7 @@ function adminPinClear(){
 }
 
 function adminPinDigit(n){
-  if(_adminPin.length>=6) return;
+  if(_adminPin.length>=6 || _adminBusy) return;
   _adminPin += n;
   updateAdminDots();
   if(_adminPin.length===6) adminPinSubmit();
@@ -4408,8 +4817,17 @@ document.addEventListener("keydown", function(e){
   else if(e.key==="Escape") showBranchStep();
 });
 
-function adminPinSubmit(){
-  if(_adminPin===SUPER_ADMIN_PIN){
+async function adminPinSubmit(){
+  var status = document.getElementById("admin-pin-status");
+  var say = function(m){ if(status) status.textContent = m; };
+  var wait = saLocked();
+  if(wait){ say("Too many wrong tries - wait "+wait+" seconds"); _adminPin = ""; updateAdminDots(); return; }
+  _adminBusy = true; say("Checking...");
+  var res;
+  try { res = await saVerifyPin(_adminPin); } catch(err){ res = {ok:false, reason:"offline"}; }
+  _adminBusy = false;
+  if(res.ok){
+    _adminFails = 0;
     // Login as super admin
     S.branch = "all";
     S.branchName = "All Branches";
@@ -4423,12 +4841,12 @@ function adminPinSubmit(){
     // Load all branch data
     syncFromSheet().then(function(){ render(); }).catch(function(){ render(); });
     render();
-  } else {
-    var status = document.getElementById("admin-pin-status");
-    if(status) status.textContent = "Incorrect PIN - try again";
-    _adminPin = "";
-    updateAdminDots();
+    return;
   }
+  if(res.reason==="offline") say("Can't check the PIN right now - check your connection");
+  else say(saRegisterFail() ? "Too many wrong tries - wait 60 seconds" : "Incorrect PIN - try again");
+  _adminPin = "";
+  updateAdminDots();
 }
 
 async function loadBranchList(){
@@ -4814,6 +5232,9 @@ async function handleAction(a,v,el,e){
   }
   if(a==="approve-order") { confirmApprove(v); return; }
   if(a==="deny-order") { confirmDeny(v); return; }
+  if(typeof a==="string" && a.indexOf("sat-")===0){
+    try { if(await saToolAction(a, v)) return; } catch(err){ console.error("Super Admin tool error:", err); showToast("Error: "+err.message); return; }
+  }
   if(typeof a==="string" && a.indexOf("cln-")===0){
     try { if(await estCleanupHandleAction(a)) return; } catch(err){ console.error("Estimate clean-up error:", err); showToast("Error: "+err.message); return; }
   }
@@ -4967,6 +5388,9 @@ async function handleAction(a,v,el,e){
     } catch(err){ showToast("Copy failed: "+err.message); }
     return;
   }
+  if(a==="sa-terms-open"){ await saTermsOpen(); return; }
+  if(a==="sa-pin-open"){ await saPinOpen(); return; }
+  if(a==="sa-backups-open"){ await saBackupsOpen(); return; }
   if(a==="sa-estimate-cleanup"){ await estCleanupOpen(); return; }
   if(a==="sa-check-bridge"){
     showToast("Checking the bridge...");
@@ -8788,6 +9212,9 @@ function renderSuperAdmin(){
   var pg = document.getElementById("pg-dashboard");
   if(!pg) return;
   if(S._saTool==="estimates" && S._cln){ estClnBind(pg); estCleanupRender(); return; }   // the estimate clean-up tool
+  if(S._saTool==="terms"){ estTermsBind(pg); renderEstTerms(pg); return; }
+  if(S._saTool==="pin"){ renderSaPin(pg); return; }
+  if(S._saTool==="backups"){ bkBind(pg); renderBackups(pg); return; }
 
   // If viewing a branch's settings, show that
   if(S._saViewBranch){
@@ -8812,8 +9239,16 @@ function renderSuperAdmin(){
     +(isDevCopy() ? "<button class='btn bp' data-a='dev-copy-live' style='width:100%;padding:12px;margin-bottom:8px;'>🧪 Copy live data into this test database</button>" : "")
     +"<div style='font-size:11px;color:#475569;text-align:center;'>Reads order sheet and adds/updates products in Firebase</div>"
     +"</div>"
+    +"<div style='margin-top:24px;border-top:1px solid #1e3a5f;padding-top:16px;'>"
+    +"<div style='font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;'>Company Settings &amp; Safety</div>"
+    +"<button class='btn bg' data-a='sa-terms-open' style='width:100%;padding:12px;margin-bottom:8px;'>🧾 Estimate warranty &amp; terms</button>"
+    +"<button class='btn bg' data-a='sa-pin-open' style='width:100%;padding:12px;margin-bottom:8px;'>🔑 Change Super Admin PIN</button>"
+    +"<button class='btn bg' data-a='sa-backups-open' style='width:100%;padding:12px;margin-bottom:4px;'>💾 Backups &amp; restore</button>"
+    +"<div id='bk-status' style='font-size:11px;color:#64748b;text-align:center;margin-bottom:6px;'></div>"
+    +"</div>"
     +"</div>";
 
+  bkConsoleStatus();
   gs("getBranches",null).then(function(res){
     var branches = res&&res.branches||[];
     var listDiv = document.getElementById("sa-branch-list");
