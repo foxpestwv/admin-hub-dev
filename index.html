@@ -454,7 +454,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.2.0";
+const APP_VERSION = "6.4.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -591,13 +591,14 @@ function estFill(txt, st){
 function estDefaults(){
   var b = S.branch||"willamette";
   var d = ESTIMATE_COMPANY_DEFAULTS[b] || {companyName:"Fox Pest Control", addr1:"", addr2:"", website:"fox-pest.com"};
-  return Object.assign({warrantyDays:90, validDays:30, paymentTerms:"upon completion of the work", taxRate:0, notifyExtra:"",
+  return Object.assign({warrantyDays:90, validDays:30, paymentTerms:"upon completion of the work", taxRate:0, notifyExtra:"", showTechPhoto:true,
     warrantyText:EST_DEFAULT_WARRANTY, termsText:EST_DEFAULT_TERMS}, d);
 }
 function estSettings(){
   var base = Object.assign({}, estDefaults(), S._estSettings||{}), t = S._estTerms || {};
   // the warranty & terms are one company-wide copy set by Super Admin; it wins over anything saved per branch
   EST_TERMS_KEYS.forEach(function(k){ if(t[k]!==undefined && t[k]!==null && t[k]!=="") base[k] = t[k]; });
+  if(typeof t.showTechPhoto==="boolean") base.showTechPhoto = t.showTechPhoto;     // Super Admin switch: the technician's photo on estimates
   return base;
 }
 function estUser(){
@@ -914,9 +915,41 @@ async function estBuildPdf(e){
   });
   ry -= 8;
   var metaX = W-M-180;
-  [["Estimate #", String(e.number||"")],["Date", new Date(e.date||e.createdAt||Date.now()).toLocaleDateString("en-US")],["Prepared by", e.createdBy||""]].forEach(function(r){
+  [["Estimate #", String(e.number||"")],["Date", new Date(e.date||e.createdAt||Date.now()).toLocaleDateString("en-US")]].forEach(function(r){
     T(r[0],metaX,ry,10,font,gray); TR(r[1],W-M,ry,10); ry -= 14;
   });
+  var prepName = e.createdBy||"";
+  if(st.showTechPhoto===false){
+    T("Prepared by",metaX,ry,10,font,gray); TR(prepName,W-M,ry,10); ry -= 14;
+  } else {
+    // the technician's round photo (or their initial) sits to the right of the "Prepared by" line
+    var navy = PDFLib.rgb(0.118,0.227,0.541), pr = 17, pcx = W-M-pr, pcy = ry-9, pk = 0.5522847498*pr, portrait = null;
+    if(e._empPhoto===undefined) await estPrepEmployeePhoto(e);
+    if(e._empPhoto){
+      try { portrait = await doc.embedJpg(Uint8Array.from(atob(String(e._empPhoto).split(",")[1]), function(ch){ return ch.charCodeAt(0); })); } catch(x){ portrait = null; }
+    }
+    if(portrait){
+      page.pushOperators(PDFLib.pushGraphicsState(), PDFLib.moveTo(pcx+pr,pcy),
+        PDFLib.appendBezierCurve(pcx+pr,pcy+pk, pcx+pk,pcy+pr, pcx,pcy+pr), PDFLib.appendBezierCurve(pcx-pk,pcy+pr, pcx-pr,pcy+pk, pcx-pr,pcy),
+        PDFLib.appendBezierCurve(pcx-pr,pcy-pk, pcx-pk,pcy-pr, pcx,pcy-pr), PDFLib.appendBezierCurve(pcx+pk,pcy-pr, pcx+pr,pcy-pk, pcx+pr,pcy),
+        PDFLib.closePath(), PDFLib.clip(), PDFLib.endPath());
+      page.drawImage(portrait, {x:pcx-pr, y:pcy-pr, width:2*pr, height:2*pr});
+      page.pushOperators(PDFLib.popGraphicsState());
+      page.drawCircle({x:pcx, y:pcy, size:pr, borderColor:navy, borderWidth:1.2});
+    } else {
+      page.drawCircle({x:pcx, y:pcy, size:pr, color:navy});
+      var ini = estPdfSafe(estInitial(prepName)), iw = bold.widthOfTextAtSize(ini,16);
+      page.drawText(ini,{x:pcx-iw/2, y:pcy-5.5, size:16, font:bold, color:PDFLib.rgb(1,1,1)});
+    }
+    var nameRight = pcx-pr-8, avail = nameRight-(metaX+font.widthOfTextAtSize("Prepared by",10)+10), nm = estPdfSafe(prepName);
+    T("Prepared by",metaX,pcy-3.5,10,font,gray);
+    if(font.widthOfTextAtSize(nm,10)<=avail){ TR(nm,nameRight,pcy-3.5,10); }
+    else {
+      var nl = wrap(nm,font,9,avail).slice(0,2);                       // a long name goes on two short lines
+      nl.forEach(function(l,i){ TR(l,nameRight,pcy+(nl.length===2?(i===0?3:-8):-3.5),9); });
+    }
+    ry = pcy-pr-8;
+  }
   var ly = logoTop-logoH-22;
   T(st.companyName||"Fox Pest Control",M,ly,11,bold); ly -= 15;
   [st.addr1, st.addr2, e.employeePhone?("Phone: "+e.employeePhone):"", e.createdByEmail?("Email: "+e.createdByEmail):"", st.website?("Web: "+st.website):""].forEach(function(l){
@@ -1043,7 +1076,7 @@ function estSettingsBody(){
     +"<button class='btn bp' style='width:100%;padding:11px;margin-bottom:20px;' data-a='est-settings-save'>💾 Save Estimate Settings</button>"
     +"<div style='font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:4px;'>Warranty &amp; Terms (read-only)</div>"
     +"<div style='font-size:11px;color:#64748b;margin-bottom:8px;'>This is exactly what prints on every estimate. The Super Admin sets it, and it is the same for every branch. Ask them if it needs to change.</div>"
-    +"<div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>Warranty: <b>"+esc(st.warrantyDays)+" days</b> · Estimate valid for: <b>"+(Number(st.validDays)>0 ? esc(st.validDays)+" days" : "no limit")+"</b> · Payment due: <b>"+esc(st.paymentTerms)+"</b></div>"
+    +"<div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>Warranty: <b>"+esc(st.warrantyDays)+" days</b> · Estimate valid for: <b>"+(Number(st.validDays)>0 ? esc(st.validDays)+" days" : "no limit")+"</b> · Payment due: <b>"+esc(st.paymentTerms)+"</b> · Technician photo on estimates: <b>"+(st.showTechPhoto===false?"off":"on")+"</b></div>"
     +estTermsPreviewHtml(st)
     +"<div style='height:10px;'></div>"
     +"<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin-bottom:8px;'>Line Item Library</div>"
@@ -1219,7 +1252,7 @@ async function estSend(){
   if(e.token){ try { await gs("revokeEstimateToken", {token:e.token}); } catch(x){} }
   var token = estNewToken();
   await gs("saveEstimateDoc", {id:e.id, pdfBase64:estBytesToB64(out.bytes), fields:out.fields,
-    snapshot:{company:{name:st.companyName, addr1:st.addr1, addr2:st.addr2, website:st.website}, warranty:estFill(st.warrantyText,st), terms:estFill(st.termsText,st), validDays:Number(st.validDays)||0}});
+    snapshot:{company:{name:st.companyName, addr1:st.addr1, addr2:st.addr2, website:st.website}, warranty:estFill(st.warrantyText,st), terms:estFill(st.termsText,st), validDays:Number(st.validDays)||0, showPhoto:st.showTechPhoto!==false, photo:e._empPhoto||""}});
   await gs("saveEstimateToken", {token:token, estimateId:e.id, branch:e.branch});
   var notify = [e.createdByEmail].concat(String(st.notifyExtra||"").split(",")).map(function(x){ return String(x||"").trim(); }).filter(Boolean);
   e.notifyEmails = notify.filter(function(x,i){ return notify.indexOf(x)===i; });
@@ -1330,6 +1363,13 @@ function estCIsConnectionProblem(msg){
 function estCErr(msg){
   return "<div style='text-align:center;padding:60px 20px;'><div style='font-size:40px;margin-bottom:12px;'>⚠️</div><div style='font-size:16px;color:#374151;'>"+esc(msg)+"</div></div>";
 }
+// the technician's round photo (or initial) on the customer's page; estimates sent before this feature show nothing, as before
+function estCAvatar(d){
+  var snap = d.snapshot || {};
+  if(snap.showPhoto!==true) return "";
+  if(snap.photo) return "<img src='"+esc(snap.photo)+"' alt='' style='width:44px;height:44px;border-radius:50%;object-fit:cover;border:2px solid #1e3a8a;flex:none;'>";
+  return "<div style='width:44px;height:44px;border-radius:50%;background:#1e3a8a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;flex:none;'>"+esc(estInitial(d.estimate && d.estimate.createdBy))+"</div>";
+}
 function estCHeader(d){
   var e = d.estimate, co = (d.snapshot&&d.snapshot.company)||{};
   return "<div style='background:#fff;border-radius:14px;padding:18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08);'>"
@@ -1338,7 +1378,8 @@ function estCHeader(d){
     +"<div style='font-size:13px;color:#6b7280;margin-bottom:12px;'>"+esc(new Date(e.date||e.createdAt||Date.now()).toLocaleDateString("en-US"))+"</div>"
     +"<div style='display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:#374151;'>"
     +"<div><div style='color:#9ca3af;font-size:11px;text-transform:uppercase;'>Prepared for</div>"+esc((e.customer&&e.customer.name)||"")+"<br>"+esc((e.customer&&e.customer.street)||"")+"</div>"
-    +"<div><div style='color:#9ca3af;font-size:11px;text-transform:uppercase;'>Prepared by</div>"+esc(e.createdBy||"")+(e.employeePhone?"<br>"+esc(e.employeePhone):"")+"</div></div></div>";
+    +"<div><div style='color:#9ca3af;font-size:11px;text-transform:uppercase;margin-bottom:4px;'>Prepared by</div>"
+    +"<div style='display:flex;align-items:center;gap:10px;'>"+estCAvatar(d)+"<div>"+esc(e.createdBy||"")+(e.employeePhone?"<br>"+esc(e.employeePhone):"")+"</div></div></div></div></div>";
 }
 function estCHtml(d){
   var e = d.estimate, snap = d.snapshot||{}, t = estTotals(e), showPrices = e.showPrices!==false;
@@ -2449,11 +2490,12 @@ const EST_TERMS_KEYS = ["warrantyText", "termsText", "warrantyDays", "validDays"
 function estTermsDraft(){
   var t = S._tm || {}, base = estDefaults(), cur = S._estTerms || {};
   var pick = function(k){ return (cur[k]!==undefined && cur[k]!==null && cur[k]!=="") ? cur[k] : base[k]; };
-  return {warrantyText:pick("warrantyText"), termsText:pick("termsText"), warrantyDays:pick("warrantyDays"), validDays:pick("validDays"), paymentTerms:pick("paymentTerms")};
+  return {warrantyText:pick("warrantyText"), termsText:pick("termsText"), warrantyDays:pick("warrantyDays"), validDays:pick("validDays"), paymentTerms:pick("paymentTerms"), showTechPhoto:cur.showTechPhoto!==false};
 }
 function estTermsRead(){
   var v = function(id){ var el = document.getElementById(id); return el ? el.value : ""; };
-  return {warrantyText:v("tm-warranty"), termsText:v("tm-terms"), warrantyDays:Number(v("tm-wdays"))||0, validDays:Number(v("tm-vdays"))||0, paymentTerms:v("tm-pay")};
+  var ph = document.getElementById("tm-photo");
+  return {warrantyText:v("tm-warranty"), termsText:v("tm-terms"), warrantyDays:Number(v("tm-wdays"))||0, validDays:Number(v("tm-vdays"))||0, paymentTerms:v("tm-pay"), showTechPhoto:ph ? !!ph.checked : true};
 }
 function estTermsPreviewHtml(t){
   var box = "max-height:200px;overflow:auto;white-space:pre-wrap;font-size:12px;color:#cbd5e1;background:#0a1628;border:1px solid #1e3a5f;border-radius:8px;padding:10px;margin-bottom:10px;";
@@ -2474,10 +2516,13 @@ function renderEstTerms(pg){
   var hist = (cur.history || []).slice().reverse();
   pg.innerHTML = "<div style='padding:16px;max-width:640px;margin:0 auto;'>"
     +"<button class='btn bg' data-a='sat-back' style='margin-bottom:12px;'>← Super Admin</button>"
-    +"<h2 style='font-size:20px;font-weight:700;margin-bottom:4px;'>Estimate Warranty &amp; Terms</h2>"
+    +"<h2 style='font-size:20px;font-weight:700;margin-bottom:4px;'>Estimate Wording &amp; Options</h2>"
     +"<div style='font-size:12px;color:#94a3b8;margin-bottom:12px;'>One set of wording for <b>every branch</b>. Managers can read it but not change it. Estimates that were already sent keep the wording they were sent with.</div>"
     +(!tm.loaded ? "<div style='text-align:center;color:#64748b;padding:30px;'>Loading...</div>" :
       (cur.updatedAt ? "<div style='font-size:11px;color:#64748b;margin-bottom:10px;'>Last changed "+esc(new Date(cur.updatedAt).toLocaleString("en-US"))+(cur.updatedBy?" by "+esc(cur.updatedBy):"")+"</div>" : "<div style='font-size:11px;color:#64748b;margin-bottom:10px;'>Currently using the built-in standard wording. Saving here replaces it for every branch.</div>")
+      +"<label style='display:flex;align-items:flex-start;gap:10px;background:#0f2744;border:1px solid #1e3a5f;border-radius:10px;padding:12px;margin-bottom:14px;cursor:pointer;'>"
+        +"<input type='checkbox' id='tm-photo' "+(d.showTechPhoto?"checked ":"")+"style='width:20px;height:20px;margin-top:2px;flex:none;'>"
+        +"<span><b>Show the technician's photo on estimates</b><br><span style='font-size:12px;color:#94a3b8;'>Appears beside &quot;Prepared by&quot; on the PDF and on the customer's signing page, taken from the profile picture of whoever made the estimate. If someone hasn't added a picture, their initial shows instead. Applies to every branch. Estimates already sent are not changed.</span></span></label>"
       +"<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;'>"
       +"<div style='margin-bottom:8px;'><div style='"+lab+"'>Warranty (days)</div><input class='inp' id='tm-wdays' type='number' min='0' value='"+esc(d.warrantyDays)+"'></div>"
       +"<div style='margin-bottom:8px;'><div style='"+lab+"'>Estimate valid for (days, 0 = no limit)</div><input class='inp' id='tm-vdays' type='number' min='0' value='"+esc(d.validDays)+"'></div></div>"
@@ -2832,6 +2877,144 @@ async function saToolAction(a, v){
   return false;
 }
 
+// ─── Technician photo on estimates ───────────────────────────────────────────
+// Crops a picture to a centred square and shrinks it (JPEG). Used when someone sets their profile picture, and again when an
+// estimate is built, so neither the accounts record nor the PDF can be bloated by a full-size phone photo.
+function estMakePortrait(srcDataUrl, size, quality){
+  size = size || 240; quality = quality || 0.82;
+  return new Promise(function(resolve, reject){
+    var img = new Image();
+    img.onload = function(){
+      try {
+        var s = Math.min(img.naturalWidth, img.naturalHeight);
+        if(!s){ reject(new Error("empty image")); return; }
+        var sx = (img.naturalWidth - s)/2, sy = (img.naturalHeight - s)/2;
+        var cv = document.createElement("canvas"); cv.width = size; cv.height = size;
+        var cx = cv.getContext("2d"); cx.fillStyle = "#ffffff"; cx.fillRect(0, 0, size, size);
+        cx.imageSmoothingQuality = "high"; cx.drawImage(img, sx, sy, s, s, 0, 0, size, size);
+        resolve(cv.toDataURL("image/jpeg", quality));
+      } catch(err){ reject(err); }
+    };
+    img.onerror = function(){ reject(new Error("couldn't read the image")); };
+    img.src = srcDataUrl;
+  });
+}
+// the account of the person who made the estimate (matched by email, then by name)
+function estCreatorAccount(e){
+  var all = (S.managers||[]).concat(S.techAccounts||[]);
+  var em = String(e.createdByEmail||"").trim().toLowerCase();
+  var byEmail = em ? all.find(function(a){ return String(a.email||"").trim().toLowerCase()===em; }) : null;
+  return byEmail || all.find(function(a){ return a.name && a.name===e.createdBy; }) || null;
+}
+// sets e._empPhoto to a small square JPEG (or "" when there is no picture, or the switch is off). Never saved with the estimate.
+async function estPrepEmployeePhoto(e){
+  e._empPhoto = "";
+  if(estSettings().showTechPhoto===false) return;
+  var acct = estCreatorAccount(e), src = acct && acct.photo;
+  if(!src && e.createdBy && e.createdBy===(S.managerName||S.currentTech) && S._userPhoto) src = S._userPhoto;
+  if(!src) return;
+  try { e._empPhoto = await estMakePortrait(src, 240, 0.82); } catch(x){ e._empPhoto = ""; }
+}
+function estInitial(name){
+  var ch = String(name||"").trim().charAt(0);
+  return ch ? ch.toUpperCase() : "?";
+}
+
+// ─── Settings > Products: categories, A-Z, search (same layout as the restock and hidden-products screens) ───
+// Every row stays in the page (collapsed categories are only hidden), so edits, "Hide Selected" and the tick boxes keep working.
+function prodSetRowHtml(p){
+  var hideFromCheckout = p.hideFromCheckout===true;
+  var trackAs = p.trackAs||"case"; // default to case
+  var unitsPerCase = p.unitsPerCase||1;
+  return "<div class='card ps-row' data-psname='"+esc(String(p.name||"").toLowerCase())+"' style='margin-bottom:8px;padding:12px 14px;'>"
+    +"<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;'>"
+    +"<div style='font-weight:600;font-size:14px;'>"+esc(p.name)+"</div>"
+    +"<div style='display:flex;gap:6px;align-items:center;'>"
+    +"<label style='display:flex;align-items:center;gap:4px;font-size:11px;color:#94a3b8;cursor:pointer;'>"
+    +"<input type='checkbox' data-field='hideFromCheckout' data-pid='"+p.id+"' "+(hideFromCheckout?"checked":"")+"> Hide from techs"
+    +"</label>"
+    +"<button class='btn bd' style='padding:4px 8px;font-size:11px;' data-a='del-prod' data-v='"+p.id+"'>Hide</button>"
+    +"<input type='checkbox' class='prod-hide-cb' data-pid='"+p.id+"' style='width:18px;height:18px;cursor:pointer;' oninput='updateHideBtn();'>"
+    +"</div>"
+    +"</div>"
+    +"<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:12px;margin-bottom:8px;'>"
+    +"<div><div style='color:#64748b;margin-bottom:3px;'>Unit</div>"
+    +"<input class='inp' style='font-size:12px;padding:4px 6px;' data-field='unit' data-pid='"+p.id+"' value='"+esc(p.unit)+"'></div>"
+    +"<div><div style='color:#64748b;margin-bottom:3px;'>Low At</div>"
+    +"<input type='number' class='inp' style='font-size:12px;padding:4px 6px;' data-field='lowAt' data-pid='"+p.id+"' value='"+p.lowAt+"'></div>"
+    +"<div><div style='color:#64748b;margin-bottom:3px;'>Truck Warn</div>"
+    +"<input type='number' class='inp' style='font-size:12px;padding:4px 6px;' data-field='truckWarnAbove' data-pid='"+p.id+"' value='"+(p.truckWarnAbove||0)+"'></div>"
+    +"</div>"
+    +"<div style='display:flex;align-items:center;gap:10px;font-size:12px;'>"
+    +"<div style='color:#64748b;'>Track as:</div>"
+    +"<label style='display:flex;align-items:center;gap:4px;cursor:pointer;'>"
+    +"<input type='radio' name='trackAs-"+p.id+"' data-field='trackAs' data-pid='"+p.id+"' value='case' "+(trackAs==="case"?"checked":"")+"> Case"
+    +"</label>"
+    +"<label style='display:flex;align-items:center;gap:4px;cursor:pointer;'>"
+    +"<input type='radio' name='trackAs-"+p.id+"' data-field='trackAs' data-pid='"+p.id+"' value='individual' "+(trackAs==="individual"?"checked":"")+"> Individual"
+    +"</label>"
+    +(trackAs==="individual"
+      ?"<div style='display:flex;align-items:center;gap:4px;'>"
+      +"<div style='color:#64748b;'>Units/case:</div>"
+      +"<input type='number' class='inp' style='font-size:12px;padding:4px 6px;width:60px;' data-field='unitsPerCase' data-pid='"+p.id+"' value='"+unitsPerCase+"' min='1'>"
+      +"</div>"
+      :"")
+    +"</div>"
+    +"</div>";
+}
+function prodSetCategoriesHtml(){
+  var groups = {}, open = S._prodOpen = S._prodOpen || {};
+  (S.products||[]).forEach(function(p){ var k = p.category || "General Pest"; (groups[k] = groups[k] || []).push(p); });
+  return Object.keys(groups).sort(function(a,b){ return (hidCatRank(a)-hidCatRank(b)) || a.localeCompare(b); }).map(function(cat){
+    var items = groups[cat].slice().sort(rsByName), slug = rsCatSlug(cat), isOpen = open[slug]===true;
+    return "<div class='ps-cat' data-open='"+(isOpen?1:0)+"' style='margin-bottom:6px;'>"
+      +"<button type='button' class='btn' data-a='ps-toggle-cat' data-v='"+slug+"' style='width:100%;text-align:left;padding:10px 14px;background:#0f2040;border:1px solid #1e3a5f;border-radius:8px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;'>"
+      +"<span style='font-weight:600;font-size:13px;color:#f59e0b;'>"+esc(cat)+"</span>"
+      +"<span style='color:#64748b;font-size:12px;'>"+items.length+" item"+(items.length===1?"":"s")+"<span class='ps-count' style='color:#60a5fa;'></span> <span class='ps-arrow'>"+(isOpen?"▲":"▼")+"</span></span></button>"
+      +"<div class='ps-cat-body' style='display:"+(isOpen?"block":"none")+";'>"+items.map(prodSetRowHtml).join("")+"</div></div>";
+  }).join("");
+}
+function prodSetUpdateCounts(pg){
+  pg = pg || document.getElementById("pg-settings"); if(!pg) return;
+  Array.prototype.forEach.call(pg.querySelectorAll(".ps-cat"), function(cat){
+    var n = cat.querySelectorAll(".prod-hide-cb:checked").length, el = cat.querySelector(".ps-count");
+    if(el) el.textContent = n ? " · "+n+" ticked" : "";
+  });
+}
+function prodSetFilter(pg){
+  pg = pg || document.getElementById("pg-settings"); if(!pg) return;
+  var q = String(S._prodSearch||"").trim().toLowerCase();
+  Array.prototype.forEach.call(pg.querySelectorAll(".ps-cat"), function(cat){
+    var body = cat.querySelector(".ps-cat-body"), any = false;
+    Array.prototype.forEach.call(body.querySelectorAll(".ps-row"), function(row){
+      var show = !q || String(row.getAttribute("data-psname")||"").indexOf(q)>=0;
+      row.style.display = show ? "" : "none"; if(show) any = true;
+    });
+    cat.style.display = (!q || any) ? "" : "none";
+    body.style.display = q ? (any ? "block" : "none") : (cat.getAttribute("data-open")==="1" ? "block" : "none");
+  });
+  var none = document.getElementById("ps-none");
+  if(none) none.style.display = (q && !Array.prototype.some.call(pg.querySelectorAll(".ps-cat"), function(c){ return c.style.display!=="none"; })) ? "block" : "none";
+}
+function prodSetSetOpen(slug, nowOpen){
+  var pg = document.getElementById("pg-settings"); if(!pg) return;
+  var open = S._prodOpen = S._prodOpen || {};
+  Array.prototype.forEach.call(pg.querySelectorAll(".ps-cat"), function(cat){
+    var btn = cat.querySelector("button[data-a='ps-toggle-cat']"); if(!btn) return;
+    var s = btn.getAttribute("data-v");
+    if(slug!==null && s!==slug) return;
+    var want = nowOpen===null ? cat.getAttribute("data-open")!=="1" : nowOpen;
+    cat.setAttribute("data-open", want ? "1" : "0"); open[s] = want;
+    cat.querySelector(".ps-arrow").textContent = want ? "▲" : "▼";
+  });
+  prodSetFilter(pg);
+}
+function prodSetBind(pg){
+  var box = pg.querySelector("#ps-search");
+  if(box) box.addEventListener("input", function(){ S._prodSearch = box.value; prodSetFilter(pg); });
+  prodSetFilter(pg); prodSetUpdateCounts(pg);
+}
+
 function msMakeTransparent(dataUrl){
   return new Promise(function(resolve){
     try {
@@ -2868,6 +3051,7 @@ function updateHideBtn(){
   var cbs = document.querySelectorAll(".prod-hide-cb:checked");
   var btn = document.getElementById("hide-selected-btn");
   if(btn) btn.textContent = "☑ Hide Selected"+(cbs.length>0?" ("+cbs.length+")":"");
+  prodSetUpdateCounts();
 }
 
 function runInvValue(){ runReport("inventory-value"); }
@@ -3385,7 +3569,7 @@ async function gs(fn, data){
         etHist = etHist.slice(-20);
         await fbSet("config", "estimateTerms", {
           warrantyText:String(etNew.warrantyText||""), termsText:String(etNew.termsText||""),
-          warrantyDays:Number(etNew.warrantyDays)||0, validDays:Number(etNew.validDays)||0, paymentTerms:String(etNew.paymentTerms||""),
+          warrantyDays:Number(etNew.warrantyDays)||0, validDays:Number(etNew.validDays)||0, paymentTerms:String(etNew.paymentTerms||""), showTechPhoto:etNew.showTechPhoto!==false,
           updatedAt:new Date().toISOString(), updatedBy:(data && data.by)||"", history:etHist});
         return {ok:true};
       }
@@ -5051,13 +5235,21 @@ async function handleAction(a,v,el,e){
       var reader = new FileReader();
       reader.onload = async function(ev){
         var dataUrl = ev.target.result;
+        // a phone photo can be several MB: crop it to a small square so the accounts record (and the estimates) stay small
+        try { dataUrl = await estMakePortrait(dataUrl, 320, 0.82); } catch(x){ /* keep the original if it can't be resized */ }
+        if(dataUrl.length > 400000){ alert("That picture is too large to save. Please choose a smaller one."); inp.remove(); return; }
         // Save to current account
         var acctArr = S.role==="manager" ? S.managers : S.techAccounts;
         var acct2 = acctArr.find(function(a2){ return a2.name===(S.managerName||S.currentTech); });
+        var prevPhoto = acct2 ? acct2.photo : undefined, prevUser = S._userPhoto;
         if(acct2){ acct2.photo = dataUrl; }
         S._userPhoto = dataUrl;
         // Save accounts to Firebase
-        await gs("saveAccountsServer", {branch:S.branch||"willamette", managers:S.managers, techAccounts:S.techAccounts, trucks:S.trucks, cats:S.cats, inspFields:S.inspFields});
+        var sv = await gs("saveAccountsServer", {branch:S.branch||"willamette", managers:S.managers, techAccounts:S.techAccounts, trucks:S.trucks, cats:S.cats, inspFields:S.inspFields});
+        if(sv && sv.ok===false){
+          if(acct2){ acct2.photo = prevPhoto; } S._userPhoto = prevUser;       // it didn't save, so don't pretend it did
+          showToast("Couldn't save your picture"+(sv.error ? ": "+sv.error : " - try again")); renderDash(); inp.remove(); return;
+        }
         lsSet("hub:managers", S.managers);
         lsSet("hub:techAccounts", S.techAccounts);
         renderDash();
@@ -5505,6 +5697,9 @@ async function handleAction(a,v,el,e){
     return;
   }
   if(a==="restock-toggle-cat") { restockToggleCat(v); return; }
+  if(a==="ps-toggle-cat"){ prodSetSetOpen(v, null); return; }
+  if(a==="ps-expand-all"){ prodSetSetOpen(null, true); return; }
+  if(a==="ps-collapse-all"){ prodSetSetOpen(null, false); return; }
   if(a==="restock-view") { S._restockView=v; renderRestock(); return; }
   if(a==="restock-add-prod") { restockAddProd(); return; }
   if(a==="restock-remove-extra") { snapshotRestockQtys(); if(S._restockExtras) S._restockExtras.splice(parseInt(v),1); renderRestock(); return; }
@@ -9241,7 +9436,7 @@ function renderSuperAdmin(){
     +"</div>"
     +"<div style='margin-top:24px;border-top:1px solid #1e3a5f;padding-top:16px;'>"
     +"<div style='font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;'>Company Settings &amp; Safety</div>"
-    +"<button class='btn bg' data-a='sa-terms-open' style='width:100%;padding:12px;margin-bottom:8px;'>🧾 Estimate warranty &amp; terms</button>"
+    +"<button class='btn bg' data-a='sa-terms-open' style='width:100%;padding:12px;margin-bottom:8px;'>🧾 Estimate wording &amp; options</button>"
     +"<button class='btn bg' data-a='sa-pin-open' style='width:100%;padding:12px;margin-bottom:8px;'>🔑 Change Super Admin PIN</button>"
     +"<button class='btn bg' data-a='sa-backups-open' style='width:100%;padding:12px;margin-bottom:4px;'>💾 Backups &amp; restore</button>"
     +"<div id='bk-status' style='font-size:11px;color:#64748b;text-align:center;margin-bottom:6px;'></div>"
@@ -9444,50 +9639,16 @@ function renderSettings(){
       +"</div>"+truckRows;
 
   } else if(tab==="products"){
-    var prodRows = S.products.map(function(p){
-      var hideFromCheckout = p.hideFromCheckout===true;
-      var trackAs = p.trackAs||"case"; // default to case
-      var unitsPerCase = p.unitsPerCase||1;
-      return "<div class='card' style='margin-bottom:8px;padding:12px 14px;'>"
-        +"<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;'>"
-        +"<div style='font-weight:600;font-size:14px;'>"+esc(p.name)+"</div>"
-        +"<div style='display:flex;gap:6px;align-items:center;'>"
-        +"<label style='display:flex;align-items:center;gap:4px;font-size:11px;color:#94a3b8;cursor:pointer;'>"
-        +"<input type='checkbox' data-field='hideFromCheckout' data-pid='"+p.id+"' "+(hideFromCheckout?"checked":"")+"> Hide from techs"
-        +"</label>"
-        +"<button class='btn bd' style='padding:4px 8px;font-size:11px;' data-a='del-prod' data-v='"+p.id+"'>Hide</button>"
-        +"<input type='checkbox' class='prod-hide-cb' data-pid='"+p.id+"' style='width:18px;height:18px;cursor:pointer;' oninput='updateHideBtn();'>"
-        +"</div>"
-        +"</div>"
-        +"<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:12px;margin-bottom:8px;'>"
-        +"<div><div style='color:#64748b;margin-bottom:3px;'>Unit</div>"
-        +"<input class='inp' style='font-size:12px;padding:4px 6px;' data-field='unit' data-pid='"+p.id+"' value='"+esc(p.unit)+"'></div>"
-        +"<div><div style='color:#64748b;margin-bottom:3px;'>Low At</div>"
-        +"<input type='number' class='inp' style='font-size:12px;padding:4px 6px;' data-field='lowAt' data-pid='"+p.id+"' value='"+p.lowAt+"'></div>"
-        +"<div><div style='color:#64748b;margin-bottom:3px;'>Truck Warn</div>"
-        +"<input type='number' class='inp' style='font-size:12px;padding:4px 6px;' data-field='truckWarnAbove' data-pid='"+p.id+"' value='"+(p.truckWarnAbove||0)+"'></div>"
-        +"</div>"
-        +"<div style='display:flex;align-items:center;gap:10px;font-size:12px;'>"
-        +"<div style='color:#64748b;'>Track as:</div>"
-        +"<label style='display:flex;align-items:center;gap:4px;cursor:pointer;'>"
-        +"<input type='radio' name='trackAs-"+p.id+"' data-field='trackAs' data-pid='"+p.id+"' value='case' "+(trackAs==="case"?"checked":"")+"> Case"
-        +"</label>"
-        +"<label style='display:flex;align-items:center;gap:4px;cursor:pointer;'>"
-        +"<input type='radio' name='trackAs-"+p.id+"' data-field='trackAs' data-pid='"+p.id+"' value='individual' "+(trackAs==="individual"?"checked":"")+"> Individual"
-        +"</label>"
-        +(trackAs==="individual"
-          ?"<div style='display:flex;align-items:center;gap:4px;'>"
-          +"<div style='color:#64748b;'>Units/case:</div>"
-          +"<input type='number' class='inp' style='font-size:12px;padding:4px 6px;width:60px;' data-field='unitsPerCase' data-pid='"+p.id+"' value='"+unitsPerCase+"' min='1'>"
-          +"</div>"
-          :"")
-        +"</div>"
-        +"</div>";
-    }).join("");
-
     hiddenCountEnsure();
-    body = "<h2 style='font-size:18px;font-weight:700;margin-bottom:12px;'>Products</h2>"
-      +prodRows
+    var nCats = {}; (S.products||[]).forEach(function(p){ nCats[p.category||"General Pest"] = true; });
+    body = "<h2 style='font-size:18px;font-weight:700;margin-bottom:4px;'>Products</h2>"
+      +"<div style='font-size:12px;color:#64748b;margin-bottom:10px;'>"+(S.products||[]).length+" products in "+Object.keys(nCats).length+" categories</div>"
+      +"<input id='ps-search' class='inp' placeholder='🔍 Search products...' value='"+esc(S._prodSearch||"")+"' style='margin-bottom:8px;'>"
+      +"<div style='display:flex;gap:8px;margin-bottom:10px;'>"
+      +"<button class='btn bg' data-a='ps-expand-all' style='flex:1;padding:8px;font-size:12px;'>Expand all</button>"
+      +"<button class='btn bg' data-a='ps-collapse-all' style='flex:1;padding:8px;font-size:12px;'>Collapse all</button></div>"
+      +prodSetCategoriesHtml()
+      +"<div id='ps-none' style='display:none;text-align:center;color:#64748b;padding:24px;'>No products match your search.</div>"
       +"<div style='display:flex;gap:8px;margin-top:12px;'>"
       +"<button class='btn bd' id='hide-selected-btn' data-a='hide-selected-products' style='flex:1;padding:12px;'>☑ Hide Selected</button>"
       +hiddenRestoreButton()
@@ -9611,6 +9772,7 @@ function renderSettings(){
     +superAdminBar+tabBar+body;
 
   // Checkboxes handled via oninput on each checkbox
+  if(S.settingsTab==="products") prodSetBind(pg);
   // Wire up product field changes
   pg.querySelectorAll("input[data-pid]").forEach(function(inp){
     inp.addEventListener("change", function(){
