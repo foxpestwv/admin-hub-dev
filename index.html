@@ -454,7 +454,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.4.0";
+const APP_VERSION = "6.4.1";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -4458,6 +4458,7 @@ async function gs(fn, data){
       }
       case "submitTechSignature": {
         // Just update Firebase status - the caller (signSubmitTech) handles Apps Script
+        if(!(await fbGet("signRequests", data.id))) return {ok:false, error:"This document hasn't been sent for signature yet. Sign it as the manager first, using \"Send to Tech for Signature\"."};
         await fbUpdate("signRequests", data.id, {
           status: "Signed",
           signedDate: new Date().toISOString(),
@@ -11829,9 +11830,14 @@ async function renderSign(skipReload){
       }
     } catch(e){ console.warn("Load sign requests:", e); }
   }
-  // If a pending sign request is set, show signing screen regardless of role
+  // If a pending sign request is set, show the signing screen regardless of role
   if(S._pendingSignReq && (S._signView==="multi-signing"||S._signView==="signing")){
-    renderSignTech(pg);
+    // A ride-along, QA form or uploaded document the manager is still creating has not been saved yet: that is the MANAGER's
+    // signing screen ("Send to Tech for Signature"). A document that is already saved and waiting for someone's signature is the
+    // signer's screen. (Sending a brand-new document to the signer's screen made it try to update a record that doesn't exist.)
+    var pendingReq = S._pendingSignReq;
+    var brandNew = S._signView==="signing" && !(S.signRequests||[]).some(function(r){ return r.id===pendingReq.id; });
+    if(brandNew) renderSignCanvas(pg, "manager"); else renderSignTech(pg);
   } else if(S.role==="manager") {
     renderSignManager(pg);
   } else {
