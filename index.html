@@ -455,7 +455,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.6.0";
+const APP_VERSION = "6.8.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -3159,11 +3159,15 @@ function scanBeep(kind){
     o.start(); o.stop(ctx.currentTime + (kind==="no" ? 0.25 : 0.12));
   } catch(x){}
 }
+// Adding things (products, barcodes, SDS or label links, stock counts) is for managers only. Everyone can look products up and scan into the cart.
+function canManageProducts(){ return S.role==="manager" || S.role==="superadmin"; }
+function needManager(what){ showToast("Only managers can "+(what||"do that")+"."); }
 function scanIsDesktop(){
   try { return !window.matchMedia("(pointer:coarse)").matches && window.innerWidth >= 800; } catch(x){ return false; }
 }
 // where a scan button leads: on a computer, the phone pairing screen; on a phone or tablet, the camera popup as before
 function scanEntry(mode, productId, callback){
+  if(mode==="register" && !canManageProducts()){ needManager("add barcodes to products"); return; }
   if(scanIsDesktop() && !S._scanLocalCamera){ rsOpen(mode==="register"?"register":"lookup", {productId:productId}); return; }
   startScanner(mode, productId, callback);
 }
@@ -3200,6 +3204,8 @@ function rsHint(rs){
 // ── the computer side ──
 async function rsOpen(kind, opts){
   opts = opts || {};
+  if(kind==="register" && !canManageProducts()){ needManager("add barcodes to products"); return; }
+  if(kind==="count" && !canManageProducts()){ needManager("count or receive stock"); return; }
   var cur = S._rs;
   if(cur && !cur.closed && cur.code){                      // already paired: just change what the scans do
     cur.kind = kind; cur.productId = opts.productId || null; cur.msg = null; cur.hidden = false;
@@ -3297,7 +3303,11 @@ async function rsHandleScan(code){
   if(rs.kind==="register"){ await rsRegister(code); return; }
   if(rs.kind==="lookup"){
     if(p){ scanBeep("ok"); rs.assign = null; rsReport(true, "✓ "+p.name); rs.hidden = true; var el = document.getElementById("rs-modal"); if(el) el.remove(); rsUpdatePill(); rsShowCard(p.id); return; }
-    scanBeep("no"); rs.assign = {code:code, then:"lookup", q:""}; rs.hidden = false;
+    if(!canManageProducts()){
+      scanBeep("no"); rs.msg = {bad:true, text:"No product has the barcode "+code+". Ask a manager to add it."}; rsReport(false, "⚠ Not in the system - ask a manager to add it");
+      rs.hidden = false; rsShowModal(); return;
+    }
+    scanBeep("no"); rs.assign = {code:code, then:"lookup", q:"", showAll:false}; rs.hidden = false;
     rsReport(false, "⚠ Not in the system - choose what to do on the computer");
     rsShowModal(); return;
   }
@@ -3315,6 +3325,7 @@ async function rsHandleScan(code){
   scanBeep("ok"); rsRenderList(); rsUpdatePill();
 }
 async function rsRegister(code){
+  if(!canManageProducts()){ needManager("add barcodes to products"); return; }
   var rs = S._rs, prod = rsProduct(rs.productId);
   if(!prod){ rs.msg = {bad:true, text:"That product is no longer in the list."}; rsReport(false, "⚠ That product is no longer in the list"); rsRenderList(); return; }
   if(!scanValidCode(code)){ rs.msg = {bad:true, text:"That doesn't look like a product barcode: "+code}; rsReport(false, "⚠ Not a product barcode"); rsRenderList(); return; }
@@ -3335,6 +3346,7 @@ async function rsRegister(code){
 }
 // ── a barcode that is not in the system: give it to an existing product, or make a new product from it ──
 async function rsAssignTo(pid){
+  if(!canManageProducts()){ needManager("add barcodes to products"); return; }
   var rs = S._rs, a = rs && rs.assign, p = rsProduct(pid); if(!a || !p) return;
   if(p.upc && scanNorm(p.upc)!==scanNorm(a.code) && !confirm("\""+p.name+"\" already has the barcode "+p.upc+".\n\nReplace it with "+a.code+"?")) return;
   try {
@@ -3346,6 +3358,7 @@ async function rsAssignTo(pid){
   await rsHandleScan(code);                                    // carry on with what the scan was for (open the card, add to the cart, count it)
 }
 async function rsCreateFromBarcode(){
+  if(!canManageProducts()){ needManager("add products"); return; }
   var rs = S._rs, a = rs && rs.assign; if(!a) return;
   var v = function(id){ var el = document.getElementById(id); return el ? String(el.value||"").trim() : ""; };
   var name = v("rs-new-name"), cat = v("rs-new-cat") || "General Pest", unit = v("rs-new-unit") || "each", qty = Math.max(0, parseInt(v("rs-new-qty"),10)||0), low = Math.max(0, parseInt(v("rs-new-low"),10)||0);
@@ -3404,12 +3417,13 @@ function rsShowModal(){
   el.querySelector("#rs-typed").addEventListener("keydown", function(ev){ if(ev.key==="Enter"){ ev.preventDefault(); rsSubmitTyped(); } });
   el.addEventListener("input", function(ev){
     var t = ev.target, r = S._rs; if(!r || !t) return;
-    if(t.id==="rs-assign-q" && r.assign){ r.assign.q = t.value; var box = document.getElementById("rs-assign-results"); if(box) box.innerHTML = rsAssignResultsHtml(t.value); }
+    if(t.id==="rs-assign-q" && r.assign){ r.assign.q = t.value; rsRefreshAssignResults(); }
   });
   el.addEventListener("change", function(ev){
     var t = ev.target, r = S._rs; if(!r || !t) return;
     if(t.getAttribute("data-rs-count")!==null){ var n = parseInt(t.value,10); r.tally[t.getAttribute("data-rs-count")] = isNaN(n) ? 0 : Math.max(0,n); rsRenderList(); }
     else if(t.getAttribute("data-rs-mode")!==null){ r.mode = t.getAttribute("data-rs-mode"); rsSync(); rsRenderList(); }
+    else if(t.getAttribute("data-rs-assignall")!==null && r.assign){ r.assign.showAll = !!t.checked; rsRefreshAssignResults(); }
   });
   rsRenderTop(); rsRenderList();
 }
@@ -3453,22 +3467,35 @@ function rsRenderTop(){
     +"<button data-a='rs-close' class='btn bd' style='"+btn+"'>"+(rs.phone?"Disconnect phone":"Cancel")+"</button></div>";
   top.innerHTML = h;
 }
-function rsAssignResultsHtml(q){
-  q = String(q||"").trim().toLowerCase();
-  if(!q) return "<div style='font-size:12px;color:#64748b;padding:6px 2px;'>Type part of the product's name to find it.</div>";
-  var list = (S.products||[]).filter(function(p){ return String(p.name).toLowerCase().indexOf(q)>=0; }).sort(function(a,b){ return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); }).slice(0,8);
-  if(!list.length) return "<div style='font-size:12px;color:#64748b;padding:6px 2px;'>No product matches \""+esc(q)+"\". You can create it below.</div>";
-  return list.map(function(p){
-    return "<button data-a='rs-assign-pick' data-v='"+esc(p.id)+"' class='btn bg' style='width:100%;text-align:left;padding:8px 10px;margin-bottom:4px;font-size:13px;display:flex;justify-content:space-between;gap:8px;'><span>"+esc(p.name)+"</span><span style='color:#64748b;font-size:11px;'>"+esc(p.category||"")+(p.upc?" · has a barcode":"")+"</span></button>";
-  }).join("");
+function rsAssignList(a){
+  var q = String(a.q||"").trim().toLowerCase();
+  return (S.products||[]).filter(function(p){ return (a.showAll || !p.upc) && (!q || String(p.name).toLowerCase().indexOf(q)>=0); })
+    .sort(function(x,y){ return x.name.toLowerCase().localeCompare(y.name.toLowerCase()); });
+}
+function rsAssignResultsHtml(a){
+  var list = rsAssignList(a), q = String(a.q||"").trim();
+  var head = "<div style='font-size:12px;color:#94a3b8;margin:6px 0;'>"+(a.showAll ? "All products" : "Products without a barcode yet")+" - "+list.length+(q ? " match" : "")+"</div>";
+  if(!list.length){
+    var why = q ? "No product matches \""+esc(q)+"\"."+(a.showAll ? "" : " Tick the box above to include products that already have a barcode.")
+                : (a.showAll ? "There are no products." : "Every product already has a barcode. Tick the box above to see them all, or create a new product.");
+    return head+"<div style='font-size:12px;color:#64748b;padding:6px 2px;'>"+why+"</div>";
+  }
+  return head+"<div style='max-height:220px;overflow-y:auto;border-radius:8px;'>"+list.map(function(p){
+    return "<button data-a='rs-assign-pick' data-v='"+esc(p.id)+"' class='btn bg' style='width:100%;text-align:left;padding:8px 10px;margin-bottom:4px;font-size:13px;display:flex;justify-content:space-between;gap:8px;'><span>"+esc(p.name)+"</span><span style='color:#64748b;font-size:11px;flex:none;'>"+esc(p.category||"")+(p.upc?" · has a barcode":"")+"</span></button>";
+  }).join("")+"</div>";
+}
+function rsRefreshAssignResults(){
+  var rs = S._rs, box = document.getElementById("rs-assign-results"); if(rs && rs.assign && box) box.innerHTML = rsAssignResultsHtml(rs.assign);
 }
 function rsAssignHtml(rs){
   var a = rs.assign; if(!a) return "";
   var h = "<div style='border:1px solid #f59e0b;border-radius:10px;padding:10px;margin-bottom:10px;background:#0f2040;'>"
-    +"<div style='font-size:13px;font-weight:700;'>This barcode isn't in the system</div><div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>"+esc(a.code)+"</div>";
+    +"<div style='font-size:13px;font-weight:700;'>This barcode isn't in the system</div><div style='font-size:12px;color:#94a3b8;margin-bottom:6px;'>"+esc(a.code)+"</div>";
   if(!a.creating){
-    h += "<input id='rs-assign-q' class='inp' autocomplete='off' placeholder='Search for the product that has this barcode...' value='"+esc(a.q||"")+"' style='font-size:13px;margin-bottom:6px;'>"
-      +"<div id='rs-assign-results'>"+rsAssignResultsHtml(a.q||"")+"</div>"
+    h += "<div style='font-size:12px;color:#e2e8f0;margin-bottom:6px;'>Which product is it for? Pick one, or create a new product.</div>"
+      +"<input id='rs-assign-q' class='inp' autocomplete='off' placeholder='Search the list...' value='"+esc(a.q||"")+"' style='font-size:13px;margin-bottom:4px;'>"
+      +"<label style='display:flex;align-items:center;gap:6px;font-size:12px;color:#94a3b8;'><input type='checkbox' data-rs-assignall "+(a.showAll?"checked":"")+"> Also show products that already have a barcode</label>"
+      +"<div id='rs-assign-results'>"+rsAssignResultsHtml(a)+"</div>"
       +"<div style='display:flex;gap:8px;margin-top:8px;'><button data-a='rs-assign-new' class='btn bp' style='flex:2;padding:8px;font-size:13px;'>＋ Create a new product</button>"
       +"<button data-a='rs-assign-skip' class='btn bg' style='flex:1;padding:8px;font-size:13px;'>Skip</button></div>";
   } else {
@@ -3514,12 +3541,13 @@ function rsRenderList(){
       +"<button data-a='rs-count-clear' class='btn bg' style='flex:1;padding:9px;'>Clear</button><button data-a='rs-done' class='btn bg' style='flex:1;padding:9px;'>Stop counting</button></div>";
   }
   var unk = Object.keys(rs.unknown);
-  if(unk.length) h += "<div style='margin-top:10px;font-size:12px;color:#fdba74;'>Barcodes with no product:</div>"
-    +unk.map(function(u){ return "<div style='display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;padding:5px 8px;background:#0f2040;border-radius:6px;margin-top:4px;'><span style='color:#e2e8f0;'>"+esc(u)+(rs.unknown[u]>1?" ×"+rs.unknown[u]:"")+"</span><button data-a='rs-unknown-assign' data-v='"+esc(u)+"' class='btn bg' style='padding:3px 10px;font-size:12px;'>Assign or create…</button></div>"; }).join("");
+  if(unk.length) h += "<div style='margin-top:10px;font-size:12px;color:#fdba74;'>Barcodes with no product"+(canManageProducts() ? "" : " (ask a manager to add them)")+":</div>"
+    +unk.map(function(u){ return "<div style='display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;padding:5px 8px;background:#0f2040;border-radius:6px;margin-top:4px;'><span style='color:#e2e8f0;'>"+esc(u)+(rs.unknown[u]>1?" ×"+rs.unknown[u]:"")+"</span>"+(canManageProducts() ? "<button data-a='rs-unknown-assign' data-v='"+esc(u)+"' class='btn bg' style='padding:3px 10px;font-size:12px;'>Assign or create…</button>" : "")+"</div>"; }).join("");
   el.innerHTML = h;
   rsUpdatePill();
 }
 async function rsApplyCounts(){
+  if(!canManageProducts()){ needManager("change stock counts"); return; }
   var rs = S._rs; if(!rs || rs.kind!=="count") return;
   var items = Object.keys(rs.tally).map(function(id){ return {p:rsProduct(id), n:rs.tally[id]}; }).filter(function(x){ return x.p; });
   if(!items.length){ showToast("Scan something first"); return; }
@@ -3547,6 +3575,8 @@ async function rsApplyCounts(){
 }
 async function rsAction(a, v){
   var rs = S._rs;
+  var mgrOnly = {"inv-count-scan":"count or receive stock", "rs-count-apply":"change stock counts", "rs-assign-pick":"add barcodes to products", "rs-assign-new":"add products", "rs-assign-save":"add products", "rs-unknown-assign":"add barcodes to products"};
+  if(mgrOnly[a] && !canManageProducts()){ needManager(mgrOnly[a]); return true; }
   switch(a){
     case "scan-items": rsOpen("cart"); return true;
     case "inv-count-scan": rsOpen("count"); return true;
@@ -3564,7 +3594,7 @@ async function rsAction(a, v){
     case "rs-count-del": if(rs){ delete rs.tally[v]; rsRenderList(); } return true;
     case "rs-count-clear": if(rs){ rs.tally = {}; rs.unknown = {}; rs.msg = null; rsRenderList(); } return true;
     case "rs-count-apply": await rsApplyCounts(); return true;
-    case "rs-unknown-assign": if(rs){ rs.assign = {code:v, then:rs.kind, q:""}; rsRenderList(); } return true;
+    case "rs-unknown-assign": if(rs){ rs.assign = {code:v, then:rs.kind, q:"", showAll:false}; rsRenderList(); } return true;
     case "rs-assign-pick": await rsAssignTo(v); return true;
     case "rs-assign-new": if(rs && rs.assign){ rs.assign.creating = true; rsRenderList(); } return true;
     case "rs-assign-back": if(rs && rs.assign){ rs.assign.creating = false; rsRenderList(); } return true;
@@ -5922,6 +5952,7 @@ async function handleAction(a,v,el,e){
   if(a==="inv-sds"){
     var ps = S.products.find(function(p){ return p.id===v; });
     if(!ps) return;
+  if(!canManageProducts()){ if(ps.sdsUrl) window.open(ps.sdsUrl,"_blank"); else showToast("No SDS sheet is saved for this product. Ask a manager to add it."); return; }
     if(ps.sdsUrl){
       var c = confirm("SDS sheet saved for "+ps.name+"\n\nOK to view, Cancel to edit URL.");
       if(c){ window.open(ps.sdsUrl,"_blank"); }
@@ -5934,6 +5965,7 @@ async function handleAction(a,v,el,e){
   if(a==="inv-label"){
     var pl = S.products.find(function(p){ return p.id===v; });
     if(!pl) return;
+  if(!canManageProducts()){ if(pl.labelUrl) window.open(pl.labelUrl,"_blank"); else showToast("No label is saved for this product. Ask a manager to add it."); return; }
     if(pl.labelUrl){
       var c2 = confirm("Label saved for "+pl.name+"\n\nOK to view, Cancel to edit URL.");
       if(c2){ window.open(pl.labelUrl,"_blank"); }
@@ -6942,7 +6974,7 @@ async function handleAction(a,v,el,e){
   if(a==="send-login-email") { sendLoginEmail("tech", parseInt(v)); return; }
   if(a==="send-mgr-login-email") { sendLoginEmail("manager", parseInt(v)); return; }
   if(a==="ti-add-prod") { tiAddProd(); return; }
-  if(a==="inv-show-add") { S._showAddProd=!S._showAddProd; renderInv(); return; }
+  if(a==="inv-show-add") { if(!canManageProducts()){ needManager("add products"); return; } S._showAddProd=!S._showAddProd; renderInv(); return; }
   if(a==="inv-toggle-cat"){ 
     if(!S._invOpenCats) S._invOpenCats={};
     S._invOpenCats[v] = S._invOpenCats[v]===false ? true : false;
@@ -7633,9 +7665,9 @@ function renderInv(){
         <div style="text-align:right;"><div style="font-size:20px;font-weight:700;color:${isLow?"#fb923c":"#e2e8f0"};">${p.qty}</div><div style="font-size:11px;color:#475569;">${esc(p.unit)}</div></div>
         <div style="display:flex;gap:5px;flex-wrap:wrap;">
   <button class="btn bg" style="padding:5px 9px;font-size:12px;" data-a="open-adj" data-v="${p.id}">Adjust</button>
-  <button class="btn bg" style="padding:5px 9px;font-size:12px;${p.upc?'color:#22c55e;':''}" title="${p.upc?'UPC: '+p.upc:'Scan barcode'}" data-a="inv-scan-upc" data-v="${p.id}">${p.upc?'✓📷':'📷'}</button>
-  <button class="btn bg" style="padding:5px 9px;font-size:12px;${p.sdsUrl?'color:#22c55e;':''}" title="${p.sdsUrl?'View SDS':'Add SDS URL'}" data-a="inv-sds" data-v="${p.id}">SDS${p.sdsUrl?'✓':''}</button>
-  <button class="btn bg" style="padding:5px 9px;font-size:12px;${p.labelUrl?'color:#22c55e;':''}" title="${p.labelUrl?'View Label':'Add Label URL'}" data-a="inv-label" data-v="${p.id}">Label${p.labelUrl?'✓':''}</button>
+  ${canManageProducts()?`<button class="btn bg" style="padding:5px 9px;font-size:12px;${p.upc?'color:#22c55e;':''}" title="${p.upc?'UPC: '+p.upc:'Scan barcode'}" data-a="inv-scan-upc" data-v="${p.id}">${p.upc?'✓📷':'📷'}</button>`:""}
+  ${(canManageProducts()||p.sdsUrl)?`<button class="btn bg" style="padding:5px 9px;font-size:12px;${p.sdsUrl?'color:#22c55e;':''}" title="${p.sdsUrl?'View SDS':'Add SDS URL'}" data-a="inv-sds" data-v="${p.id}">SDS${p.sdsUrl?'✓':''}</button>`:""}
+  ${(canManageProducts()||p.labelUrl)?`<button class="btn bg" style="padding:5px 9px;font-size:12px;${p.labelUrl?'color:#22c55e;':''}" title="${p.labelUrl?'View Label':'Add Label URL'}" data-a="inv-label" data-v="${p.id}">Label${p.labelUrl?'✓':''}</button>`:""}
   <button class="btn bd" style="padding:5px 9px;font-size:12px;" data-a="remove-prod" data-v="${p.id}">X</button>
 </div>
       </div>${panel}</div>`;
@@ -7702,9 +7734,9 @@ function renderInv(){
               <div style="text-align:right;"><div style="font-size:20px;font-weight:700;color:${isLow?"#fb923c":"#e2e8f0"};">${p.qty}</div><div style="font-size:11px;color:#475569;">${esc(p.unit)}</div></div>
               <div style="display:flex;gap:5px;flex-wrap:wrap;">
                 <button class="btn bg" style="padding:5px 9px;font-size:12px;" data-a="open-adj" data-v="${p.id}">Adjust</button>
-                <button class="btn bg" style="padding:5px 9px;font-size:12px;${p.upc?'color:#22c55e;':''}" title="${p.upc?'UPC: '+p.upc:'Scan barcode'}" data-a="inv-scan-upc" data-v="${p.id}">${p.upc?'✓📷':'📷'}</button>
-                <button class="btn bg" style="padding:5px 9px;font-size:12px;${p.sdsUrl?'color:#22c55e;':''}" title="${p.sdsUrl?'View SDS':'Add SDS URL'}" data-a="inv-sds" data-v="${p.id}">SDS${p.sdsUrl?'✓':''}</button>
-                <button class="btn bg" style="padding:5px 9px;font-size:12px;${p.labelUrl?'color:#22c55e;':''}" title="${p.labelUrl?'View Label':'Add Label URL'}" data-a="inv-label" data-v="${p.id}">Label${p.labelUrl?'✓':''}</button>
+                ${canManageProducts()?`<button class="btn bg" style="padding:5px 9px;font-size:12px;${p.upc?'color:#22c55e;':''}" title="${p.upc?'UPC: '+p.upc:'Scan barcode'}" data-a="inv-scan-upc" data-v="${p.id}">${p.upc?'✓📷':'📷'}</button>`:""}
+                ${(canManageProducts()||p.sdsUrl)?`<button class="btn bg" style="padding:5px 9px;font-size:12px;${p.sdsUrl?'color:#22c55e;':''}" title="${p.sdsUrl?'View SDS':'Add SDS URL'}" data-a="inv-sds" data-v="${p.id}">SDS${p.sdsUrl?'✓':''}</button>`:""}
+                ${(canManageProducts()||p.labelUrl)?`<button class="btn bg" style="padding:5px 9px;font-size:12px;${p.labelUrl?'color:#22c55e;':''}" title="${p.labelUrl?'View Label':'Add Label URL'}" data-a="inv-label" data-v="${p.id}">Label${p.labelUrl?'✓':''}</button>`:""}
                 <button class="btn bd" style="padding:5px 9px;font-size:12px;" data-a="remove-prod" data-v="${p.id}">X</button>
               </div>
             </div>${panel}</div>`;
@@ -7735,7 +7767,7 @@ function renderInv(){
     <p style="color:#475569;font-size:13px;margin-bottom:16px;">From Active Inventory sheet</p>
     ${low.length>0?`<div style="background:#431407;border:1px solid #c2410c;border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;gap:8px;align-items:center;"><span style="color:#fb923c;">!</span><span style="color:#fb923c;font-size:13px;font-weight:500;">${low.length} item${low.length>1?"s":""} low on stock</span></div>`:""}
     ${addPanel}
-    <div style="display:flex;gap:8px;margin-bottom:14px;"><button class="btn bg" style="font-size:12px;" data-a="inv-view" data-v="checkouts">Checkout History</button><button class="btn bg" style="font-size:12px;" data-a="inv-count-scan">📷 Count or receive by scanning</button><button class="btn bg" style="font-size:12px;" data-a="quick-scan">📷 Scan to find or add a product</button></div>
+    <div style="display:flex;gap:8px;margin-bottom:14px;"><button class="btn bg" style="font-size:12px;" data-a="inv-view" data-v="checkouts">Checkout History</button>${canManageProducts()?`<button class="btn bg" style="font-size:12px;" data-a="inv-count-scan">📷 Count or receive by scanning</button>`:""}<button class="btn bg" style="font-size:12px;" data-a="quick-scan">${canManageProducts()?"📷 Scan to find or add a product":"📷 Scan a product"}</button></div>
     <div style="display:flex;gap:8px;margin-bottom:12px;"><input type="text" class="inp" id="inv-search" placeholder="🔍 Search products..." value="${esc(S._invSearch||'')}" style="flex:1;" oninput="S._invSearch=this.value;renderInvCats();"></div>
     <div id="inv-prod-list">${catHtml}</div>`;
 }
@@ -8546,6 +8578,7 @@ function isIOS(){
 }
 
 async function startScanner(mode, productId, callback){
+  if(mode==="register" && !canManageProducts()){ needManager("add barcodes to products"); return; }
   _scannerMode = mode;
   _scannerProductId = productId;
   _scannerCallback = callback;
@@ -8723,6 +8756,7 @@ async function onBarcodeScanned(code){
   _scanConfirmCount = 0;
 
   if(_scannerMode==="register"){
+    if(!canManageProducts()){ needManager("add barcodes to products"); stopScanner(); return; }
     // Save UPC to product
     _scannerActive = false;
     document.getElementById("scanner-result").textContent = "✓ Scanned: "+code;
@@ -8772,7 +8806,7 @@ async function onBarcodeScanned(code){
     if(matchedProd){
       document.getElementById("scanner-result").textContent = "✓ Found: "+matchedProd.name;
       document.getElementById("scanner-result").style.color = "#22c55e";
-      setTimeout(function(){ showProductLookup(matchedProd.id); }, 500);
+      setTimeout(function(){ showProductLookup(matchedProd.id, {fromScan:true}); }, 500);
     } else {
       document.getElementById("scanner-result").textContent = "⚠ No product for barcode: "+code+" ("+S.products.filter(function(p){return p.upc;}).length+" registered)";
       document.getElementById("scanner-result").style.color = "#f59e0b";
@@ -8813,6 +8847,7 @@ function scannerManualOverride(){
 }
 
 async function saveProductUrl(prod, field, url){
+  if(!canManageProducts()){ needManager("add or change SDS and label links"); return; }
   prod[field] = url;
   try {
     // Update local state immediately
@@ -8826,7 +8861,10 @@ async function saveProductUrl(prod, field, url){
   } catch(e){ alert("Error saving: "+e.message); }
 }
 
-function showProductLookup(productId){
+// The reasons offered when stock is adjusted (the Inventory tile's Adjust panel uses the same six, in this order)
+var ADJ_REASONS = [["Restock Received","Restock Received"],["Weekly Inventory Count","Weekly Inventory Count"],["Damage / Loss","Damage / Loss"],["Audit Correction","Audit Correction"],["Returned to Warehouse","Returned to Warehouse"],["Other","Other (type below)"]];
+function showProductLookup(productId, opts){
+  opts = opts || {};                      // opts.fromScan: opened by this device's own camera, so reopen the scanner after an update
   stopScanner();
   var prod = S.products.find(function(p){ return p.id===productId; });
   if(!prod){ showToast("Product not found"); return; }
@@ -8834,6 +8872,7 @@ function showProductLookup(productId){
   var isManager = S.role==="manager";
   var stockColor = prod.qty<=0?"#ef4444":prod.qty<=prod.lowAt?"#f59e0b":"#22c55e";
   var cartQty = (S.cart&&S.cart[prod.id])||0;
+  var lastReason = "Weekly Inventory Count"; try { var lr = localStorage.getItem("hub:lastAdjReason"); if(lr && ADJ_REASONS.some(function(r){ return r[0]===lr; })) lastReason = lr; } catch(x){}
 
   var overlay = document.createElement("div");
   overlay.id = "lookup-overlay";
@@ -8889,7 +8928,8 @@ function showProductLookup(productId){
       +"<input id='adj-qty' type='number' class='inp' style='flex:1;text-align:center;font-size:18px;font-weight:700;padding:6px;' value='0' placeholder='0'>"
       +"<button id='adj-plus' style='background:#1e3a5f;color:#e2e8f0;border:none;width:36px;height:36px;border-radius:8px;font-size:20px;cursor:pointer;'>+</button>"
       +"</div>"
-      +"<input id='adj-reason' type='text' class='inp' style='width:100%;margin-bottom:8px;font-size:13px;' placeholder='Reason (e.g. used, received, damaged)'>"
+      +"<select id='adj-reason' class='inp' style='width:100%;margin-bottom:6px;font-size:13px;'>"+ADJ_REASONS.map(function(r){ return "<option value='"+esc(r[0])+"'"+(r[0]===lastReason?" selected":"")+">"+esc(r[1])+"</option>"; }).join("")+"</select>"
+  +"<input id='adj-reason-other' type='text' class='inp' style='width:100%;margin-bottom:8px;font-size:13px;display:none;' placeholder='Describe the reason...'>"
       +"<button id='adj-submit' style='width:100%;background:#2563eb;color:#fff;border:none;padding:10px;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;'>Apply Adjustment</button>"
       +"</div>"
       :"")
@@ -8927,39 +8967,40 @@ function showProductLookup(productId){
   var vcBtn = document.getElementById("lookup-view-cart");
   if(vcBtn) vcBtn.onclick = function(){ overlay.remove(); S.tab="checkout"; S._showCart=true; render(); };
 
-  // Manager adjust stock
+  // Manager adjust stock - saved exactly like the Adjust button on the Inventory tile
   if(isManager){
-    var adjQtyInput = document.getElementById("adj-qty");
-    document.getElementById("adj-minus").onclick = function(){
-      adjQtyInput.value = parseInt(adjQtyInput.value||0) - 1;
-    };
-    document.getElementById("adj-plus").onclick = function(){
-      adjQtyInput.value = parseInt(adjQtyInput.value||0) + 1;
-    };
-    document.getElementById("adj-submit").onclick = async function(){
+    var adjQtyInput = document.getElementById("adj-qty"), adjSel = document.getElementById("adj-reason"), adjOther = document.getElementById("adj-reason-other");
+    adjSel.onchange = function(){ adjOther.style.display = adjSel.value==="Other" ? "block" : "none"; if(adjSel.value==="Other") adjOther.focus(); };
+    adjSel.onchange();
+    document.getElementById("adj-minus").onclick = function(){ adjQtyInput.value = (parseInt(adjQtyInput.value||0)||0) - 1; };
+    document.getElementById("adj-plus").onclick = function(){ adjQtyInput.value = (parseInt(adjQtyInput.value||0)||0) + 1; };
+    var adjBtn = document.getElementById("adj-submit");
+    adjBtn.onclick = async function(){
       var delta = parseInt(adjQtyInput.value)||0;
-      var reason = document.getElementById("adj-reason").value.trim();
       if(delta===0){ alert("Enter a quantity to adjust"); return; }
-      var newQty = prod.qty + delta;
+      var old = Number(prod.qty)||0, newQty = old + delta;
       if(newQty < 0){ alert("Cannot go below 0"); return; }
+      if(!String(prod.id).startsWith("prod_")){ alert("This product can't be saved to the database (its ID isn't recognised). Nothing was changed."); return; }
+      var reason = adjSel.value; if(reason==="Other") reason = adjOther.value.trim() || "Other";
+      adjBtn.disabled = true; adjBtn.textContent = "Saving...";
+      var br = S.branch||"willamette", r1, r2;
+      try {
+        r1 = await gs("updateQtyServer", {id:prod.id, qty:newQty, branch:br});
+        if(r1 && r1.ok===false) throw new Error(r1.error||"the stock wasn't saved");
+        r2 = await gs("logAdjustmentServer", {product:prod.name, unit:prod.unit, oldQty:old, newQty:newQty, manager:S.managerName, reason:reason, branch:br});
+        if(r2 && r2.ok===false) throw new Error(r2.error||"the history entry wasn't saved");
+      } catch(err){
+        adjBtn.disabled = false; adjBtn.textContent = "Apply Adjustment";
+        if(r1 && r1.ok!==false){ try { await gs("updateQtyServer", {id:prod.id, qty:old, branch:br}); } catch(x){} }      // the stock saved but the history didn't: put the stock back so the two agree
+        alert("Couldn't save the change: "+((err&&err.message)||err)+"\n\nNothing was changed.");
+        return;
+      }
       prod.qty = newQty;
-      await gs("updateProduct", {id:prod.id, qty:newQty});
-      // Log adjustment
-      var logEntry = {
-        id:"adj_"+Date.now(),
-        date:new Date().toISOString(),
-        product:prod.name,
-        unit:prod.unit,
-        qtyBefore:prod.qty-delta,
-        qtyAfter:newQty,
-        change:delta,
-        tech:S.managerName||"",
-        reason:reason||"Manual adjustment"
-      };
-      await gs("logAdjustment", logEntry);
-      lsSet("hub:products", S.products);
+      try { localStorage.setItem("hub:lastAdjReason", adjSel.value); } catch(x){}
+      lsSet("hub:products", S.products); save();
       overlay.remove();
-      showToast((delta>0?"+":"")+delta+" "+prod.unit+" — New stock: "+newQty);
+      showToast(prod.name+": "+old+" → "+newQty+" "+prod.unit);
+      if(opts.fromScan) scanEntry("lookup", null, null);          // keep scanning: the scanner opens again for the next item
     };
   }
 
@@ -8980,11 +9021,13 @@ function showProductLookup(productId){
         lsSet("hub:cart", S.cart);
         overlay.remove();
         showToast("Added "+qty+" "+prod.unit+" of "+prod.name+" to cart");
+  if(opts.fromScan) scanEntry("lookup", null, null);
       } else {
         delete S.cart[prod.id];
         lsSet("hub:cart", S.cart);
         overlay.remove();
         showToast("Removed "+prod.name+" from cart");
+  if(opts.fromScan) scanEntry("lookup", null, null);
       }
     };
   }
@@ -10544,6 +10587,7 @@ async function removeProd(id){
 
 // ─── Add Product to Inventory ─────────────────────────────────────────────────
 async function invAddProduct(){
+  if(!canManageProducts()){ needManager("add products"); return; }
   const name = (document.getElementById("new-prod-name")||{}).value||"";
   const unit = (document.getElementById("new-prod-unit")||{}).value||"each";
   const qty  = parseInt((document.getElementById("new-prod-qty")||{}).value)||0;
