@@ -9,7 +9,7 @@
     // Hide login immediately if guest signing token present
     (function(){ var q = new URLSearchParams(window.location.search);
       if(q.get("estimate")) document.documentElement.style.background="#f3f4f6";
-      else if(q.get("sign")) document.documentElement.style.background="#070f1e"; })();
+      else if(q.get("sign") || q.get("scan")) document.documentElement.style.background="#070f1e"; })();
   </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
@@ -210,7 +210,7 @@ input,textarea,select,button{font-family:inherit;}
   </div>
 
   <script>
-    if(new URLSearchParams(window.location.search).get("sign") || new URLSearchParams(window.location.search).get("estimate")){
+    if(new URLSearchParams(window.location.search).get("sign") || new URLSearchParams(window.location.search).get("estimate") || new URLSearchParams(window.location.search).get("scan")){
       document.getElementById("login") && (document.getElementById("login").style.display="none");
     }
   </script>
@@ -259,6 +259,7 @@ input,textarea,select,button{font-family:inherit;}
     </div>
     <div style="padding:10px 14px;background:#0a1628;">
       <div id="scanner-result" style="font-size:12px;color:#94a3b8;text-align:center;margin-bottom:10px;">Ready to scan...</div>
+      <button onclick="scanSwitchToPhone()" style="width:100%;margin-bottom:8px;background:none;border:1px solid #1e3a5f;color:#94a3b8;border-radius:6px;padding:7px;font-size:12px;cursor:pointer;">📱 Use a phone as the scanner</button>
       <button onclick="scannerManualOverride()" style="width:100%;background:#1e3a5f;color:#e2e8f0;border:none;padding:10px;border-radius:8px;font-size:13px;cursor:pointer;">✏ Enter manually</button>
     </div>
   </div>
@@ -454,7 +455,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.4.1";
+const APP_VERSION = "6.5.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -3015,6 +3016,482 @@ function prodSetBind(pg){
   prodSetFilter(pg); prodSetUpdateCounts(pg);
 }
 
+// ─── Tiny QR code generator (byte mode, error correction M, versions 1-10) ──────────────────────────────────────
+// Written for this app so the pairing code needs no outside library. Follows the QR specification (ISO/IEC 18004).
+var QRGEN = (function(){
+  var ECC_M = [0,10,16,26,18,24,16,18,22,22,26], BLK_M = [0,1,1,1,2,2,4,4,4,5,5];      // per version 1-10, level M
+  function rawCodewords(v){ var r=(16*v+128)*v+64; if(v>=2){ var na=Math.floor(v/7)+2; r-=(25*na-10)*na-55; if(v>=7) r-=36; } return Math.floor(r/8); }
+  function dataCodewords(v){ return rawCodewords(v) - ECC_M[v]*BLK_M[v]; }
+  function gfMul(x,y){ var z=0; for(var i=7;i>=0;i--){ z=(z<<1)^((z>>>7)*0x11D); z^=((y>>>i)&1)*x; } return z; }
+  function rsDivisor(deg){
+    var r=[]; for(var i=0;i<deg-1;i++) r.push(0); r.push(1); var root=1;
+    for(var i2=0;i2<deg;i2++){ for(var j=0;j<r.length;j++){ r[j]=gfMul(r[j],root); if(j+1<r.length) r[j]^=r[j+1]; } root=gfMul(root,2); }
+    return r;
+  }
+  function rsRemainder(data, div){
+    var r=div.map(function(){ return 0; });
+    data.forEach(function(b){ var f=b^r.shift(); r.push(0); div.forEach(function(c,i){ r[i]^=gfMul(c,f); }); });
+    return r;
+  }
+  function utf8(text){
+    if(typeof TextEncoder!=="undefined") return Array.prototype.slice.call(new TextEncoder().encode(text));
+    var s=unescape(encodeURIComponent(text)), a=[]; for(var i=0;i<s.length;i++) a.push(s.charCodeAt(i)); return a;
+  }
+  function alignPositions(v, size){
+    if(v===1) return [];
+    var na=Math.floor(v/7)+2, step=(v===32)?26:Math.ceil((v*4+4)/(na*2-2))*2, r=[6];
+    for(var i=0,p=size-7;i<na-1;i++,p-=step) r.splice(1,0,p);
+    return r;
+  }
+  function make(text){
+    var bytes = utf8(String(text)), ver, cap;
+    for(ver=1; ver<=10; ver++){ cap = dataCodewords(ver)*8; if(4 + (ver<=9?8:16) + bytes.length*8 <= cap) break; }
+    if(ver>10) return null;
+    var bits=[]; function put(val,len){ for(var i=len-1;i>=0;i--) bits.push((val>>>i)&1); }
+    put(4,4); put(bytes.length, ver<=9?8:16); bytes.forEach(function(b){ put(b,8); });
+    put(0, Math.min(4, cap-bits.length)); while(bits.length%8) bits.push(0);
+    for(var pad=0xEC; bits.length<cap; pad^=0xEC^0x11) put(pad,8);
+    var data=[]; for(var i=0;i<bits.length;i+=8){ var b=0; for(var j=0;j<8;j++) b=(b<<1)|bits[i+j]; data.push(b); }
+    // error correction, split into blocks and interleaved
+    var nb=BLK_M[ver], eccLen=ECC_M[ver], raw=rawCodewords(ver), shortBlocks=nb-raw%nb, shortLen=Math.floor(raw/nb), blocks=[], div=rsDivisor(eccLen);
+    for(var bi=0,k=0;bi<nb;bi++){
+      var dat=data.slice(k, k+shortLen-eccLen+(bi<shortBlocks?0:1)); k+=dat.length;
+      var ecc=rsRemainder(dat, div); if(bi<shortBlocks) dat.push(0); blocks.push(dat.concat(ecc));
+    }
+    var all=[]; for(var ci=0;ci<blocks[0].length;ci++){ blocks.forEach(function(blk,bj){ if(ci!==shortLen-eccLen || bj>=shortBlocks) all.push(blk[ci]); }); }
+    // the matrix
+    var size=ver*4+17, mod=[], isF=[];
+    for(var y=0;y<size;y++){ mod.push(new Array(size).fill(false)); isF.push(new Array(size).fill(false)); }
+    function setF(x,y,d){ mod[y][x]=!!d; isF[y][x]=true; }
+    function bit(v,i){ return ((v>>>i)&1)!==0; }
+    for(var t=0;t<size;t++){ setF(6,t,t%2===0); setF(t,6,t%2===0); }
+    function finder(cx,cy){ for(var dy=-4;dy<=4;dy++) for(var dx=-4;dx<=4;dx++){ var dd=Math.max(Math.abs(dx),Math.abs(dy)), xx=cx+dx, yy=cy+dy; if(xx>=0&&xx<size&&yy>=0&&yy<size) setF(xx,yy,dd!==2&&dd!==4); } }
+    finder(3,3); finder(size-4,3); finder(3,size-4);
+    function align(cx,cy){ for(var dy=-2;dy<=2;dy++) for(var dx=-2;dx<=2;dx++) setF(cx+dx,cy+dy,Math.max(Math.abs(dx),Math.abs(dy))!==1); }
+    var pos=alignPositions(ver,size), np=pos.length;
+    for(var ai=0;ai<np;ai++) for(var aj=0;aj<np;aj++){ if(!((ai===0&&aj===0)||(ai===0&&aj===np-1)||(ai===np-1&&aj===0))) align(pos[ai],pos[aj]); }
+    function drawFormat(mask){
+      var d=(0<<3)|mask, rem=d;                                   // level M = 0
+      for(var i=0;i<10;i++) rem=(rem<<1)^((rem>>>9)*0x537);
+      var fb=((d<<10)|rem)^0x5412;
+      for(var i1=0;i1<=5;i1++) setF(8,i1,bit(fb,i1));
+      setF(8,7,bit(fb,6)); setF(8,8,bit(fb,7)); setF(7,8,bit(fb,8));
+      for(var i2=9;i2<15;i2++) setF(14-i2,8,bit(fb,i2));
+      for(var i3=0;i3<8;i3++) setF(size-1-i3,8,bit(fb,i3));
+      for(var i4=8;i4<15;i4++) setF(8,size-15+i4,bit(fb,i4));
+      setF(8,size-8,true);
+    }
+    function drawVersion(){
+      if(ver<7) return;
+      var rem=ver; for(var i=0;i<12;i++) rem=(rem<<1)^((rem>>>11)*0x1F25);
+      var vb=(ver<<12)|rem;
+      for(var j=0;j<18;j++){ var col=bit(vb,j), a=size-11+j%3, b=Math.floor(j/3); setF(a,b,col); setF(b,a,col); }
+    }
+    drawFormat(0); drawVersion();
+    // place the data bits in the zigzag
+    var bi2=0;
+    for(var right=size-1;right>=1;right-=2){
+      if(right===6) right=5;
+      for(var vert=0;vert<size;vert++) for(var j2=0;j2<2;j2++){
+        var x=right-j2, upward=((right+1)&2)===0, yy=upward?size-1-vert:vert;
+        if(!isF[yy][x] && bi2<all.length*8){ mod[yy][x]=bit(all[bi2>>>3],7-(bi2&7)); bi2++; }
+      }
+    }
+    function applyMask(m){
+      for(var y2=0;y2<size;y2++) for(var x2=0;x2<size;x2++){
+        var inv; switch(m){
+          case 0: inv=(x2+y2)%2===0; break; case 1: inv=y2%2===0; break; case 2: inv=x2%3===0; break; case 3: inv=(x2+y2)%3===0; break;
+          case 4: inv=(Math.floor(x2/3)+Math.floor(y2/2))%2===0; break; case 5: inv=x2*y2%2+x2*y2%3===0; break;
+          case 6: inv=(x2*y2%2+x2*y2%3)%2===0; break; default: inv=((x2+y2)%2+x2*y2%3)%2===0;
+        }
+        if(!isF[y2][x2] && inv) mod[y2][x2]=!mod[y2][x2];
+      }
+    }
+    function penalty(){
+      var res=0, dark=0, line, run, i, j;
+      function scan(getter){
+        var s=""; for(var q=0;q<size;q++) s+=getter(q)?"1":"0";
+        var r=1; for(var q2=1;q2<=size;q2++){ if(q2<size && s[q2]===s[q2-1]) r++; else { if(r>=5) res+=3+(r-5); r=1; } }
+        var p; for(p=0;p<=size-11;p++){ var w=s.substr(p,11); if(w==="10111010000"||w==="00001011101") res+=40; }
+      }
+      for(i=0;i<size;i++){ scan(function(q){ return mod[i][q]; }); scan(function(q){ return mod[q][i]; }); }
+      for(i=0;i<size;i++) for(j=0;j<size;j++){ if(mod[i][j]) dark++; if(i<size-1&&j<size-1&&mod[i][j]===mod[i][j+1]&&mod[i][j]===mod[i+1][j]&&mod[i][j]===mod[i+1][j+1]) res+=3; }
+      var total=size*size, k=Math.ceil(Math.abs(dark*20-total*10)/total)-1; res+=Math.max(0,k)*10;
+      return res;
+    }
+    var best=0, bestPen=Infinity;
+    for(var m=0;m<8;m++){ applyMask(m); drawFormat(m); var pen=penalty(); if(pen<bestPen){ best=m; bestPen=pen; } applyMask(m); }
+    applyMask(best); drawFormat(best);
+    return {size:size, version:ver, modules:mod};
+  }
+  function svg(text, px){
+    var q=make(text); if(!q) return "";
+    var quiet=4, total=q.size+quiet*2, path="";
+    for(var y=0;y<q.size;y++) for(var x=0;x<q.size;x++) if(q.modules[y][x]) path+="M"+(x+quiet)+","+(y+quiet)+"h1v1h-1z";
+    return "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 "+total+" "+total+"' width='"+px+"' height='"+px+"' shape-rendering='crispEdges' role='img' aria-label='QR code'><rect width='"+total+"' height='"+total+"' fill='#fff'/><path d='"+path+"' fill='#000'/></svg>";
+  }
+  return {make:make, svg:svg};
+})();
+// ─── Remote scanning: use a phone's camera as the scanner for a computer ────────────────────────────────────────
+// The computer opens a short-lived "scan session" record and shows a QR code. The phone opens that link (?scan=CODE), scans with its
+// camera and adds each barcode to the record; the computer is listening and reacts. Everything travels through the shared database
+// over the internet (Wi-Fi or cellular), so no Bluetooth or special set-up is needed, and the phone page never sees any app data.
+var RS_TTL_MS = 30*60*1000;                       // a session lasts 30 minutes
+function isScanPage(){ return !!new URLSearchParams(window.location.search).get("scan"); }
+function scanNorm(u){ return String(u==null?"":u).trim().replace(/^0+/,""); }
+function scanFindProduct(code){
+  var raw = String(code==null?"":code).trim(), cn = scanNorm(raw);
+  return (S.products||[]).find(function(p){
+    if(!p.upc) return false;
+    var pu = String(p.upc).trim();
+    return pu===raw || scanNorm(pu)===cn || pu===cn || scanNorm(pu)===raw;      // exact, or ignoring leading zeros (UPC-A vs EAN-13)
+  }) || null;
+}
+function scanValidCode(c){ var t = String(c||"").trim(); return /^\d{6,14}$/.test(t) || /^[A-Za-z0-9\-]{6,20}$/.test(t); }
+function scanBeep(kind){
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext; if(!AC) return;
+    var ctx = window._scanAudio || (window._scanAudio = new AC()), o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = kind==="no" ? 220 : 880; g.gain.value = 0.08; o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + (kind==="no" ? 0.25 : 0.12));
+  } catch(x){}
+}
+function scanIsDesktop(){
+  try { return !window.matchMedia("(pointer:coarse)").matches && window.innerWidth >= 800; } catch(x){ return false; }
+}
+// where a scan button leads: on a computer, the phone pairing screen; on a phone or tablet, the camera popup as before
+function scanEntry(mode, productId, callback){
+  if(scanIsDesktop() && !S._scanLocalCamera){ rsOpen(mode==="register"?"register":"lookup", {productId:productId}); return; }
+  startScanner(mode, productId, callback);
+}
+function scanSwitchToPhone(){
+  var mode = _scannerMode, pid = _scannerProductId;
+  stopScanner();
+  rsOpen(mode==="register" ? "register" : mode==="pull" ? "cart" : "lookup", {productId:pid, forceQr:true});
+}
+function rsLink(code){ return estBase() + "?scan=" + encodeURIComponent(code); }
+function rsNewCode(){
+  var A = "ABCDEFGHJKMNPQRSTUVWXYZ23456789", out = "", a = new Uint8Array(6);
+  (window.crypto||window.msCrypto).getRandomValues(a);
+  for(var i=0;i<6;i++) out += A.charAt(a[i] % A.length);
+  return out;
+}
+function rsTitle(rs){
+  if(rs.kind==="register"){ var p = (S.products||[]).find(function(x){ return x.id===rs.productId; }); return "Register barcode" + (p ? ": "+p.name : ""); }
+  return {lookup:"Look up a product", cart:"Scan items into the cart", count:"Count stock by scanning"}[rs.kind] || "Scan";
+}
+
+// ── the computer side ──
+async function rsOpen(kind, opts){
+  opts = opts || {};
+  if(S._rs) rsClose();
+  var rs = S._rs = {kind:kind, productId:opts.productId||null, code:"", phone:false, processed:{}, tally:{}, cart:{}, unknown:{}, mode:"set", last:"", msg:null, closed:false,
+    started:Date.now(), showQr: !!opts.forceQr || scanIsDesktop()};
+  rsShowModal();
+  try {
+    await initFirebase();
+    if(S._rs!==rs) return;                                       // closed while starting
+    rs.code = rsNewCode();
+    rs.ref = _db.collection("scanSessions").doc(rs.code);
+    await rs.ref.set({code:rs.code, kind:kind, status:"open", phone:false, scans:[], createdAt:new Date().toISOString(), expiresAt:new Date(Date.now()+RS_TTL_MS).toISOString()});
+    rsRenderTop();
+    rs.unsub = rs.ref.onSnapshot(function(snap){ rsOnSnap(snap); }, function(){ rsStartPolling(); });
+    rsPruneOld();
+  } catch(err){ rs.error = err.message || String(err); rsRenderTop(); }
+}
+// sessions left behind by a closed tab are tiny, but tidy them: delete any that expired more than an hour ago
+function rsPruneOld(){
+  try {
+    _db.collection("scanSessions").get().then(function(snap){
+      snap.docs.forEach(function(d){
+        var x = d.data() || {};
+        if(x.expiresAt && new Date(x.expiresAt).getTime() < Date.now() - 3600000) _db.collection("scanSessions").doc(d.id).delete().catch(function(){});
+      });
+    }).catch(function(){});
+  } catch(x){}
+}
+function rsStartPolling(){
+  var rs = S._rs; if(!rs || rs.poll) return;
+  rs.poll = setInterval(async function(){ try { rsOnSnap(await rs.ref.get()); } catch(x){} }, 2500);
+}
+function rsOnSnap(snap){
+  var rs = S._rs; if(!rs || rs.closed || !snap || !snap.exists) return;
+  var d = snap.data() || {};
+  if(d.status==="closed"){                                         // the phone pressed "End session"
+    if(!rs.phoneEnded){ rs.phoneEnded = true; rs.phone = false; rs.msg = {text:"The phone ended the session."}; rsRenderTop(); rsRenderList(); }
+    return;
+  }
+  if(d.phone && !rs.phone){ rs.phone = true; scanBeep("ok"); rsRenderTop(); }
+  (d.scans||[]).slice().sort(function(a,b){ return String(a.at).localeCompare(String(b.at)); }).forEach(function(s){
+    if(!s || !s.id || rs.processed[s.id]) return;
+    rs.processed[s.id] = true; rsHandleScan(s.upc);
+  });
+}
+function rsClose(){
+  var rs = S._rs; if(!rs) return;
+  rs.closed = true;
+  try { if(rs.unsub) rs.unsub(); } catch(x){}
+  if(rs.poll) clearInterval(rs.poll);
+  if(rs.cameraOn){ try { stopScanner(); } catch(x){} }
+  if(rs.ref){ rs.ref.update({status:"closed"}).catch(function(){}).then(function(){ return rs.ref.delete(); }).catch(function(){}); }
+  var el = document.getElementById("rs-modal"); if(el) el.remove();
+  S._rs = null;
+}
+async function rsHandleScan(code){
+  var rs = S._rs; if(!rs || rs.closed) return;
+  code = String(code==null?"":code).trim(); if(!code) return;
+  rs.last = code; rs.msg = null;
+  var p = scanFindProduct(code);
+  if(!p && rs.kind==="lookup"){                                  // a barcode registered a moment ago: refresh the list once, like the camera scanner does
+    try { var fp = await gs("getProductsServer", {branch:S.branch||"willamette"}); if(fp && fp.products){ S.products = fp.products; lsSet("hub:products", S.products); p = scanFindProduct(code); } } catch(x){}
+    if(!S._rs || S._rs!==rs) return;
+  }
+  if(rs.kind==="lookup"){
+    if(p){ scanBeep("ok"); var pid = p.id; rsClose(); showProductLookup(pid); return; }
+    scanBeep("no"); rs.msg = {bad:true, text:"No product has the barcode "+code+"."}; rsRenderList(); return;
+  }
+  if(rs.kind==="register"){ await rsRegister(code); return; }
+  if(!p){ rs.unknown[code] = (rs.unknown[code]||0)+1; scanBeep("no"); rsRenderList(); return; }
+  if(rs.kind==="cart"){
+    if(!S.cart) S.cart = {};
+    S.cart[p.id] = (S.cart[p.id]||0)+1; lsSet("hub:cart", S.cart); updateCartBadge();
+    rs.cart[p.id] = (rs.cart[p.id]||0)+1;
+    if(S.tab==="checkout") renderCheckout();
+  } else if(rs.kind==="count"){
+    rs.tally[p.id] = (rs.tally[p.id]||0)+1;
+  }
+  scanBeep("ok"); rsRenderList();
+}
+async function rsRegister(code){
+  var rs = S._rs, prod = (S.products||[]).find(function(x){ return x.id===rs.productId; });
+  if(!prod){ rs.msg = {bad:true, text:"That product is no longer in the list."}; rsRenderList(); return; }
+  if(!scanValidCode(code)){ rs.msg = {bad:true, text:"That doesn't look like a product barcode: "+code}; rsRenderList(); return; }
+  var other = scanFindProduct(code);
+  if(other && other.id!==prod.id){
+    if(!confirm("This barcode is already registered to \""+other.name+"\".\n\nMove it to \""+prod.name+"\"?")){ rs.msg = {text:"Not changed."}; rsRenderList(); return; }
+    other.upc = ""; try { await gs("updateProductUpcServer", {id:other.id, upc:""}); } catch(x){}
+  }
+  try {
+    prod.upc = code; lsSet("hub:products", S.products);
+    await gs("updateProductUpcServer", {id:prod.id, upc:code});
+    scanBeep("ok"); var nm = prod.name; rsClose();
+    if(S.tab==="inventory") renderInv();
+    showToast("Barcode saved for "+nm);
+  } catch(err){ rs.msg = {bad:true, text:"Couldn't save: "+(err.message||err)}; rsRenderList(); }
+}
+function rsSubmitTyped(){
+  var inp = document.getElementById("rs-typed"); if(!inp) return;
+  var v = String(inp.value||"").trim(); inp.value = "";
+  if(!v) return;
+  if(!scanValidCode(v)){ var rs = S._rs; if(rs){ rs.msg = {bad:true, text:"That doesn't look like a barcode: "+v}; rsRenderList(); } return; }
+  rsHandleScan(v);
+}
+function rsUseCamera(){
+  var rs = S._rs; if(!rs) return;
+  if(rs.kind==="register"){ var pid = rs.productId; rsClose(); S._scanLocalCamera = true; startScanner("register", pid, null); return; }
+  if(rs.kind==="lookup"){ rsClose(); S._scanLocalCamera = true; startScanner("lookup", null, function(pid){ showProductLookup(pid); }); return; }
+  rs.cameraOn = true; S._scanLocalCamera = true;
+  startScanner("pull", null, function(pid, name, code){ rsHandleScan(code); });
+}
+
+// ── the pairing screen on the computer ──
+function rsShowModal(){
+  var old = document.getElementById("rs-modal"); if(old) old.remove();
+  var el = document.createElement("div"); el.id = "rs-modal";
+  el.style.cssText = "position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(2,8,23,.78);z-index:999990;display:flex;align-items:center;justify-content:center;padding:12px;";
+  el.innerHTML = "<div style='background:#0a1628;border:2px solid #f59e0b;border-radius:16px;width:100%;max-width:480px;max-height:92vh;overflow-y:auto;padding:16px;color:#e2e8f0;box-shadow:0 8px 40px rgba(0,0,0,.9);'>"
+    +"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;'><div id='rs-title' style='font-weight:700;font-size:16px;'></div>"
+    +"<button data-a='rs-close' class='btn bg' style='padding:4px 10px;font-size:13px;flex:none;'>✕</button></div>"
+    +"<div id='rs-top'></div>"
+    +"<div style='display:flex;gap:6px;margin:12px 0 6px;'><input id='rs-typed' class='inp' autocomplete='off' placeholder='Or type or scan a barcode here, then Enter' style='flex:1;font-size:13px;'>"
+    +"<button data-a='rs-typed-add' class='btn bg' style='padding:6px 12px;flex:none;'>Add</button></div>"
+    +"<div id='rs-list'></div></div>";
+  document.body.appendChild(el);
+  el.querySelector("#rs-typed").addEventListener("keydown", function(ev){ if(ev.key==="Enter"){ ev.preventDefault(); rsSubmitTyped(); } });
+  el.addEventListener("change", function(ev){
+    var t = ev.target, rs = S._rs; if(!rs || !t) return;
+    if(t.getAttribute("data-rs-count")!==null){ var n = parseInt(t.value,10); rs.tally[t.getAttribute("data-rs-count")] = isNaN(n) ? 0 : Math.max(0,n); rsRenderList(); }
+    else if(t.getAttribute("data-rs-mode")!==null){ rs.mode = t.getAttribute("data-rs-mode"); rsRenderList(); }
+  });
+  rsRenderTop(); rsRenderList();
+}
+function rsRenderTop(){
+  var rs = S._rs, top = document.getElementById("rs-top"); if(!rs || !top) return;
+  document.getElementById("rs-title").textContent = rsTitle(rs);
+  var btn = "padding:8px 12px;font-size:13px;", h = "";
+  if(rs.error){
+    h = "<div style='color:#fb923c;font-size:13px;margin-bottom:8px;'>Couldn't start a phone connection ("+esc(rs.error)+"). You can still type or scan a barcode below.</div>";
+  } else if(rs.showQr){
+    if(!rs.code) h = "<div style='color:#64748b;padding:28px;text-align:center;'>Starting...</div>";
+    else {
+      h = "<div style='display:flex;gap:14px;align-items:center;flex-wrap:wrap;'>"
+        +"<div id='rs-qr' style='flex:none;background:#fff;border-radius:10px;padding:4px;line-height:0;'>"+QRGEN.svg(rsLink(rs.code),176)+"</div>"
+        +"<div style='flex:1;min-width:160px;font-size:13px;line-height:1.5;'><div style='font-weight:700;margin-bottom:4px;'>Scan this with your phone's camera</div>"
+        +"<div style='color:#94a3b8;'>It opens a scanner page. Both devices just need internet.</div>"
+        +"<div style='margin-top:6px;font-size:12px;color:#64748b;'>Code <b id='rs-code' style='color:#f59e0b;letter-spacing:2px;'>"+esc(rs.code)+"</b></div></div></div>"
+        +"<div id='rs-status' style='margin-top:10px;font-size:13px;font-weight:600;color:"+(rs.phone?"#22c55e":"#94a3b8")+";'>"+(rs.phone?"📱 Phone connected - start scanning":"Waiting for your phone...")+"</div>";
+    }
+  } else {
+    h = "<div style='font-size:13px;color:#94a3b8;margin-bottom:8px;'>Use this device's camera, or pair another phone.</div>";
+  }
+  h += "<div style='display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;'><button data-a='rs-camera' class='btn "+(rs.showQr?"bg":"bp")+"' style='"+btn+"'>📷 Use this device's camera</button>"
+    +(rs.showQr?"":"<button data-a='rs-show-qr' class='btn bg' style='"+btn+"'>📱 Use another phone</button>")+"</div>";
+  top.innerHTML = h;
+}
+function rsRenderList(){
+  var rs = S._rs, el = document.getElementById("rs-list"); if(!rs || !el) return;
+  var h = "", prodName = function(id){ var p = (S.products||[]).find(function(x){ return x.id===id; }); return p ? p.name : id; };
+  if(rs.msg) h += "<div style='font-size:13px;padding:8px 10px;border-radius:8px;margin-bottom:8px;background:"+(rs.msg.bad?"#431407":"#14532d")+";color:"+(rs.msg.bad?"#fdba74":"#bbf7d0")+";'>"+esc(rs.msg.text)+"</div>";
+  if(rs.last) h += "<div style='font-size:12px;color:#64748b;margin-bottom:8px;'>Last barcode: <span style='color:#e2e8f0;'>"+esc(rs.last)+"</span></div>";
+  if(rs.kind==="cart"){
+    var ids = Object.keys(rs.cart);
+    h += "<div style='font-weight:600;font-size:13px;margin-bottom:6px;'>Added to the cart this session</div>";
+    h += ids.length ? ids.map(function(id){ return "<div style='display:flex;justify-content:space-between;font-size:13px;padding:6px 8px;background:#0f2040;border-radius:6px;margin-bottom:4px;'><span>"+esc(prodName(id))+"</span><span style='color:#22c55e;font-weight:700;'>+"+rs.cart[id]+" (cart: "+(S.cart[id]||0)+")</span></div>"; }).join("")
+               : "<div style='font-size:12px;color:#64748b;margin-bottom:6px;'>Nothing yet. Each scan adds one to the cart.</div>";
+    h += "<div style='display:flex;gap:8px;margin-top:8px;'><button data-a='rs-open-cart' class='btn bp' style='flex:1;padding:9px;'>🛒 View cart</button><button data-a='rs-close' class='btn bg' style='flex:1;padding:9px;'>Done</button></div>";
+  } else if(rs.kind==="count"){
+    var cids = Object.keys(rs.tally);
+    h += "<div style='display:flex;gap:12px;flex-wrap:wrap;font-size:12px;margin-bottom:8px;'>"
+      +"<label style='display:flex;align-items:center;gap:5px;'><input type='radio' name='rs-count-mode' data-rs-mode='set' "+(rs.mode==="set"?"checked":"")+"> Counting stock (set to the counted number)</label>"
+      +"<label style='display:flex;align-items:center;gap:5px;'><input type='radio' name='rs-count-mode' data-rs-mode='add' "+(rs.mode==="add"?"checked":"")+"> Receiving (add to current stock)</label></div>";
+    h += cids.length ? cids.map(function(id){
+        var p = (S.products||[]).find(function(x){ return x.id===id; }) || {qty:0}, n = rs.tally[id], after = rs.mode==="add" ? (Number(p.qty)||0)+n : n;
+        return "<div style='display:flex;align-items:center;gap:6px;font-size:13px;padding:6px 8px;background:#0f2040;border-radius:6px;margin-bottom:4px;'>"
+          +"<div style='flex:1;min-width:0;'><div>"+esc(prodName(id))+"</div><div style='font-size:11px;color:#64748b;'>now "+esc(p.qty)+" → "+esc(after)+"</div></div>"
+          +"<button data-a='rs-count-dec' data-v='"+esc(id)+"' class='btn bg' style='padding:2px 9px;'>−</button>"
+          +"<input type='number' min='0' data-rs-count='"+esc(id)+"' value='"+n+"' class='inp' style='width:58px;padding:4px 6px;font-size:13px;text-align:center;'>"
+          +"<button data-a='rs-count-inc' data-v='"+esc(id)+"' class='btn bg' style='padding:2px 9px;'>+</button>"
+          +"<button data-a='rs-count-del' data-v='"+esc(id)+"' class='btn bd' style='padding:2px 8px;'>✕</button></div>";
+      }).join("") : "<div style='font-size:12px;color:#64748b;margin-bottom:6px;'>Nothing counted yet. Each scan adds one. Nothing changes in inventory until you tap Apply.</div>";
+    h += "<div style='display:flex;gap:8px;margin-top:8px;'><button data-a='rs-count-apply' class='btn bp' style='flex:2;padding:9px;"+(cids.length?"":"opacity:.5;")+"'>Apply counts ("+cids.length+")</button>"
+      +"<button data-a='rs-count-clear' class='btn bg' style='flex:1;padding:9px;'>Clear</button><button data-a='rs-close' class='btn bg' style='flex:1;padding:9px;'>Close</button></div>";
+  }
+  var unk = Object.keys(rs.unknown);
+  if(unk.length) h += "<div style='margin-top:10px;font-size:12px;color:#fdba74;'>Barcodes with no product ("+unk.length+"): "+unk.map(function(u){ return esc(u)+(rs.unknown[u]>1?" ×"+rs.unknown[u]:""); }).join(", ")+"</div>";
+  el.innerHTML = h;
+}
+async function rsApplyCounts(){
+  var rs = S._rs; if(!rs || rs.kind!=="count") return;
+  var items = Object.keys(rs.tally).map(function(id){ return {p:(S.products||[]).find(function(x){ return x.id===id; }), n:rs.tally[id]}; }).filter(function(x){ return x.p; });
+  if(!items.length){ showToast("Scan something first"); return; }
+  var reason = rs.mode==="add" ? "Restock Received" : "Weekly Inventory Count";
+  var changes = items.map(function(x){ var old = Number(x.p.qty)||0, nq = Math.max(0, rs.mode==="add" ? old+x.n : x.n); return {p:x.p, old:old, nq:nq}; }).filter(function(c){ return c.nq!==c.old; });
+  var lines = changes.slice(0,15).map(function(c){ return "  "+c.p.name+": "+c.old+" → "+c.nq; }).join("\n") + (changes.length>15 ? "\n  ...and "+(changes.length-15)+" more" : "");
+  if(!changes.length){ showToast("Those counts match what is already in stock"); return; }
+  if(!confirm("Apply these "+changes.length+" change"+(changes.length===1?"":"s")+" as \""+reason+"\"?\n\n"+lines+"\n\nProducts you did not scan are not touched.")) return;
+  var done = 0, failed = [];
+  for(var i=0;i<changes.length;i++){
+    var c = changes[i];
+    try {
+      c.p.qty = c.nq;
+      await gs("updateQtyServer", {id:c.p.id, qty:c.nq, branch:S.branch||"willamette"});
+      await gs("logAdjustmentServer", {product:c.p.name, unit:c.p.unit, oldQty:c.old, newQty:c.nq, manager:S.managerName, reason:reason, branch:S.branch||"willamette"});
+      done++;
+    } catch(err){ c.p.qty = c.old; failed.push(c.p.name); }
+  }
+  save();
+  if(!S._rs || S._rs!==rs) return;
+  rs.tally = {}; rs.msg = {text:"Applied "+done+" change"+(done===1?"":"s")+(failed.length?" - could not save: "+failed.join(", "):""), bad:failed.length>0};
+  if(S.tab==="inventory") renderInv();
+  rsRenderList();
+}
+async function rsAction(a, v){
+  var rs = S._rs;
+  switch(a){
+    case "scan-items": rsOpen("cart"); return true;
+    case "inv-count-scan": rsOpen("count"); return true;
+    case "scan-use-phone": scanSwitchToPhone(); return true;
+    case "rs-close": rsClose(); return true;
+    case "rs-typed-add": rsSubmitTyped(); return true;
+    case "rs-camera": rsUseCamera(); return true;
+    case "rs-show-qr": if(rs){ rs.showQr = true; rsRenderTop(); } return true;
+    case "rs-open-cart": rsClose(); S.tab = "checkout"; S._checkView = "cart"; render(); return true;
+    case "rs-count-inc": if(rs){ rs.tally[v] = (rs.tally[v]||0)+1; rsRenderList(); } return true;
+    case "rs-count-dec": if(rs){ rs.tally[v] = Math.max(0,(rs.tally[v]||0)-1); rsRenderList(); } return true;
+    case "rs-count-del": if(rs){ delete rs.tally[v]; rsRenderList(); } return true;
+    case "rs-count-clear": if(rs){ rs.tally = {}; rs.unknown = {}; rs.msg = null; rsRenderList(); } return true;
+    case "rs-count-apply": await rsApplyCounts(); return true;
+  }
+  return false;
+}
+
+// ── the phone side (the page that opens from the QR code) ──
+async function rsPhoneBoot(code){
+  var l = document.getElementById("login"), ap = document.getElementById("app");
+  if(l) l.style.display = "none"; if(ap) ap.style.display = "none";
+  var wrap = document.createElement("div"); wrap.id = "rsp";
+  wrap.style.cssText = "position:fixed;left:0;top:0;right:0;bottom:0;background:#0a1628;color:#e2e8f0;z-index:99999;overflow-y:auto;font-family:Arial,Helvetica,sans-serif;padding:16px;text-align:center;";
+  wrap.innerHTML = "<div style='max-width:460px;margin:0 auto;'><div style='font-size:12px;color:#f59e0b;letter-spacing:3px;font-weight:700;'>FOX PEST CONTROL</div>"
+    +"<div style='font-size:22px;font-weight:800;margin:4px 0 12px;'>📱 Phone Scanner</div>"
+    +"<div id='rsp-status' style='font-size:14px;color:#94a3b8;margin-bottom:12px;'>Connecting...</div>"
+    +"<div id='rsp-cam' style='display:none;'><div id='rsp-reader' style='width:100%;max-width:360px;height:240px;margin:0 auto;background:#000;border-radius:12px;overflow:hidden;'></div></div>"
+    +"<div id='rsp-last' style='margin:14px 0 4px;font-size:16px;font-weight:700;min-height:22px;'></div><div id='rsp-count' style='font-size:13px;color:#64748b;'></div>"
+    +"<div id='rsp-manual' style='display:none;margin-top:16px;display:flex;gap:6px;justify-content:center;'><input id='rsp-input' autocomplete='off' placeholder='Or type a barcode' style='flex:1;max-width:240px;padding:10px;border-radius:8px;border:1px solid #1e3a5f;background:#0f2040;color:#e2e8f0;font-size:15px;'>"
+    +"<button id='rsp-send' style='padding:10px 16px;border-radius:8px;border:none;background:#1e3a8a;color:#fff;font-weight:700;'>Send</button></div>"
+    +"<button id='rsp-end' style='margin-top:22px;padding:10px 20px;border-radius:8px;border:1px solid #475569;background:none;color:#94a3b8;font-size:14px;'>End session</button></div>";
+  document.body.appendChild(wrap);
+  var $ = function(id){ return document.getElementById(id); }, st = function(t, color){ var e = $("rsp-status"); e.textContent = t; e.style.color = color || "#94a3b8"; };
+  var sent = 0, over = false, ref = null, lastCode = "", lastSeenAt = 0, h5 = null, stream = null;
+  var stopCamera = function(){
+    over = true;
+    try { if(h5){ h5.stop().catch(function(){}); } } catch(x){}
+    try { if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); } } catch(x){}
+    $("rsp-cam").style.display = "none"; $("rsp-manual").style.display = "none";
+  };
+  var finish = function(text, color){ stopCamera(); st(text, color); $("rsp-end").textContent = "Close"; };
+  var fail = function(text){ finish(text, "#fb923c"); };
+  $("rsp-end").onclick = async function(){
+    if(over){ try { window.close(); } catch(x){} return; }
+    try { if(ref) await ref.update({status:"closed"}); } catch(x){}
+    finish("Session ended. You can close this page.");
+  };
+  try { await initFirebase(); } catch(err){ fail("Couldn't connect. Check your internet connection and try again."); return; }
+  var snap;
+  try { ref = _db.collection("scanSessions").doc(code); snap = await ref.get(); } catch(err){ fail("Couldn't connect. Check your internet connection and try again."); return; }
+  var d = snap && snap.exists ? snap.data() : null;
+  if(!d || d.status==="closed" || (d.expiresAt && new Date(d.expiresAt).getTime() < Date.now())){ fail("This scanning session has ended. Scan the QR code on the computer again."); return; }
+  try { await ref.update({phone:true, phoneAt:new Date().toISOString()}); } catch(err){ fail("This scanning session has ended. Scan the QR code on the computer again."); return; }
+  st("✓ Connected to the computer. Point the camera at a barcode.", "#22c55e");
+  ref.onSnapshot(function(s){ if(!over && (!s.exists || (s.data()||{}).status==="closed")) finish("Finished ✓ You can close this page.", "#22c55e"); }, function(){});
+  try { if(navigator.wakeLock) navigator.wakeLock.request("screen").catch(function(){}); } catch(x){}
+  var send = async function(codeText){
+    if(over) return;
+    try {
+      await ref.update({scans:firebase.firestore.FieldValue.arrayUnion({id:"s"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), upc:codeText, at:new Date().toISOString()}), lastSeen:new Date().toISOString()});
+      sent++; $("rsp-last").textContent = "✓ Sent: "+codeText; $("rsp-count").textContent = sent+" scan"+(sent===1?"":"s")+" sent";
+      try { if(navigator.vibrate) navigator.vibrate(60); } catch(x){}
+    } catch(err){ fail("This scanning session has ended. Scan the QR code on the computer again."); }
+  };
+  window._rspSend = send;
+  // a barcode counts once; the same code counts again only after it has left the camera's view for a moment
+  var accept = function(text){
+    var t = String(text||"").trim(); if(!scanValidCode(t) || over) return;
+    var now = Date.now(), same = (t===lastCode);
+    var gap = now - lastSeenAt; lastSeenAt = now;
+    if(same && gap < 1200) return;
+    lastCode = t; send(t);
+  };
+  window._rspAccept = accept;
+  $("rsp-manual").style.display = "flex";
+  var typed = function(){ var v = String($("rsp-input").value||"").trim(); $("rsp-input").value = ""; if(scanValidCode(v)) send(v); };
+  $("rsp-send").onclick = typed; $("rsp-input").addEventListener("keydown", function(ev){ if(ev.key==="Enter") typed(); });
+  var formats = (typeof Html5QrcodeSupportedFormats!=="undefined") ? [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39] : undefined;
+  $("rsp-cam").style.display = "block";
+  if(typeof Html5Qrcode!=="undefined"){
+    h5 = new Html5Qrcode("rsp-reader");
+    h5.start({facingMode:"environment"}, {fps:10, qrbox:{width:260,height:110}, aspectRatio:1.7, formatsToSupport:formats}, function(t){ accept(t); }, function(){})
+      .catch(function(err){ $("rsp-cam").style.display = "none"; st("Camera blocked or unavailable ("+((err&&err.message)||err)+"). Allow camera access for this site, or type the barcode below.", "#fb923c"); });
+  } else if(typeof BarcodeDetector!=="undefined"){
+    try {
+      var video = document.createElement("video"); video.setAttribute("playsinline",""); video.muted = true; video.style.cssText = "width:100%;height:100%;object-fit:cover;"; $("rsp-reader").appendChild(video);
+      stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}}}); video.srcObject = stream; await video.play();
+      var det = new BarcodeDetector({formats:["ean_13","ean_8","upc_a","upc_e","code_128","code_39"]});
+      var loop = async function(){ if(over) return; try { var r = await det.detect(video); if(r.length) accept(r[0].rawValue); } catch(x){} requestAnimationFrame(loop); };
+      requestAnimationFrame(loop);
+    } catch(err){ $("rsp-cam").style.display = "none"; st("Camera blocked or unavailable. Allow camera access for this site, or type the barcode below.", "#fb923c"); }
+  } else { $("rsp-cam").style.display = "none"; st("Camera scanning isn't available in this browser. Type the barcode below.", "#fb923c"); }
+}
+
 function msMakeTransparent(dataUrl){
   return new Promise(function(resolve){
     try {
@@ -5035,6 +5512,7 @@ async function adminPinSubmit(){
 }
 
 async function loadBranchList(){
+  if(isScanPage()) return;
   var listDiv = document.getElementById("branch-list");
   if(!listDiv) return;
   listDiv.innerHTML = "<div style='text-align:center;color:#64748b;padding:10px;'>Loading...</div>";
@@ -5223,10 +5701,10 @@ async function handleAction(a,v,el,e){
   if(a==="close-drawer"){ closeDrawer(); return; }
   if(a==="drawer-tab"){
     closeDrawer();
-    if(v==="__scan__"){ startScanner("lookup", null, null); return; }
+    if(v==="__scan__"){ scanEntry("lookup", null, null); return; }
     S.tab=v; S.inspView="home"; S.invView="list"; S.checkDone=false; render(); return;
   }
-  if(a==="inv-scan-upc"){ startScanner("register", v, null); return; }
+  if(a==="inv-scan-upc"){ scanEntry("register", v, null); return; }
   if(a==="open-profile-photo"){
     var inp = document.createElement("input");
     inp.type = "file"; inp.accept = "image/*"; inp.style.display = "none";
@@ -5285,7 +5763,7 @@ async function handleAction(a,v,el,e){
     }
     return;
   }
-  if(a==="quick-scan"){ startScanner("lookup", null, function(pid){ showProductLookup(pid); }); return; }
+  if(a==="quick-scan"){ scanEntry("lookup", null, function(pid){ showProductLookup(pid); }); return; }
   if(a==="close-panel") { S._adjId=null; render(); return; }
   if(a==="do-restock") { doRestock(v); return; }
   if(a==="do-adj") { doAdj(v); return; }
@@ -5698,6 +6176,9 @@ async function handleAction(a,v,el,e){
     return;
   }
   if(a==="restock-toggle-cat") { restockToggleCat(v); return; }
+  if(typeof a==="string" && (a.indexOf("rs-")===0 || a==="scan-items" || a==="inv-count-scan" || a==="scan-use-phone")){
+    try { if(await rsAction(a, v)) return; } catch(err){ console.error("Scan error:", err); showToast("Scan error: "+err.message); return; }
+  }
   if(a==="ps-toggle-cat"){ prodSetSetOpen(v, null); return; }
   if(a==="ps-expand-all"){ prodSetSetOpen(null, true); return; }
   if(a==="ps-collapse-all"){ prodSetSetOpen(null, false); return; }
@@ -6490,7 +6971,7 @@ function setPage(id){
 
 function render(){
   // Don't render normal UI if guest signing is active
-  if(new URLSearchParams(window.location.search).get("sign") || new URLSearchParams(window.location.search).get("estimate")) return;
+  if(new URLSearchParams(window.location.search).get("sign") || new URLSearchParams(window.location.search).get("estimate") || new URLSearchParams(window.location.search).get("scan")) return;
   // Super admin gets its own console
   if(S.role==="superadmin"){
     document.getElementById("login").style.display="none";
@@ -7074,7 +7555,7 @@ function renderInv(){
     <p style="color:#475569;font-size:13px;margin-bottom:16px;">From Active Inventory sheet</p>
     ${low.length>0?`<div style="background:#431407;border:1px solid #c2410c;border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;gap:8px;align-items:center;"><span style="color:#fb923c;">!</span><span style="color:#fb923c;font-size:13px;font-weight:500;">${low.length} item${low.length>1?"s":""} low on stock</span></div>`:""}
     ${addPanel}
-    <div style="display:flex;gap:8px;margin-bottom:14px;"><button class="btn bg" style="font-size:12px;" data-a="inv-view" data-v="checkouts">Checkout History</button></div>
+    <div style="display:flex;gap:8px;margin-bottom:14px;"><button class="btn bg" style="font-size:12px;" data-a="inv-view" data-v="checkouts">Checkout History</button><button class="btn bg" style="font-size:12px;" data-a="inv-count-scan">📷 Count or receive by scanning</button></div>
     <div style="display:flex;gap:8px;margin-bottom:12px;"><input type="text" class="inp" id="inv-search" placeholder="🔍 Search products..." value="${esc(S._invSearch||'')}" style="flex:1;" oninput="S._invSearch=this.value;renderInvCats();"></div>
     <div id="inv-prod-list">${catHtml}</div>`;
 }
@@ -7193,6 +7674,7 @@ function renderCheckout(){
     +"<div style='display:flex;gap:8px;margin-bottom:12px;'>"
     +"<input type='text' id='check-search' class='inp' style='flex:1;' placeholder='🔍 Search products...' value='"+esc(S.checkSearch||"")+"'>"
     +"<button data-a='check-starred-only' style='background:"+(starredOnly?"#f59e0b":"#1e3a5f")+";color:"+(starredOnly?"#000":"#e2e8f0")+";border:none;padding:8px 14px;border-radius:8px;font-size:16px;cursor:pointer;touch-action:manipulation;' title='Show starred only'>⭐</button>"
+    +"<button data-a='scan-items' style='background:#1e3a5f;color:#e2e8f0;border:none;padding:8px 14px;border-radius:8px;font-size:16px;cursor:pointer;touch-action:manipulation;' title='Scan products into the cart'>📷</button>"
     +"</div>"
     +"<div id='checkout-product-list'>"
     +(prods.length===0
@@ -8118,7 +8600,9 @@ async function onBarcodeScanned(code){
     }
   } else if(_scannerMode==="pull"){
     // Match scanned UPC to order items
-    var matched = S.products.find(function(p){ return p.upc===code; });
+    var matched = scanFindProduct(code);
+    if(matched && window._pullLast && window._pullLast.id===matched.id && Date.now()-window._pullLast.at < 2500) return;   // same item still in front of the camera
+    if(matched) window._pullLast = {id:matched.id, at:Date.now()};
     if(matched){
       document.getElementById("scanner-result").textContent = "✓ "+matched.name;
       document.getElementById("scanner-result").style.color = "#22c55e";
@@ -8257,7 +8741,7 @@ function showProductLookup(productId){
   document.getElementById("lookup-close").onclick = function(){ overlay.remove(); };
   document.getElementById("lookup-scan-more").onclick = function(){
     overlay.remove();
-    startScanner("lookup", null, function(pid){ showProductLookup(pid); });
+    scanEntry("lookup", null, function(pid){ showProductLookup(pid); });
   };
 
   var vcBtn = document.getElementById("lookup-view-cart");
@@ -13747,6 +14231,11 @@ setTimeout(function(){ if(!S.role) loadBranchList(); }, 100);
   var t = new URLSearchParams(window.location.search).get("estimate");
   if(t) estCustomerBoot(t);
 })();
+// Phone scanner link (?scan=CODE): the page a phone opens from the computer's QR code, no login
+(function(){
+  var s = new URLSearchParams(window.location.search).get("scan");
+  if(s) rsPhoneBoot(String(s).toUpperCase().replace(/[^A-Z0-9]/g,""));
+})();
 
 // v2.0.0 Welcome splash - called after login
 function showWelcomeSplash(){
@@ -13848,6 +14337,7 @@ if(dbg) dbg.textContent = "Initializing...";
 
 // Initialize Firebase and sync accounts in background - don't block UI
 setTimeout(function(){
+  if(isScanPage()) return;                 // the phone scanner page loads only its own scan session
   initFirebase().then(function(){
     // Firebase ready - silently refresh accounts in background
     loadAccountsFromSheet().catch(function(){});
