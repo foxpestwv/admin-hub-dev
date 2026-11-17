@@ -50,6 +50,20 @@ input,textarea,select,button{font-family:inherit;}
 .bdg{background:#ef4444;color:#fff;border-radius:50%;width:15px;height:15px;font-size:10px;display:inline-flex;align-items:center;justify-content:center;margin-left:2px;}
 #wrap{max-width:760px;margin:0 auto;padding:20px 14px;}
 .pg{display:none;} .pg.on{display:block;}
+/* Home Screen honeycomb: a compact comb - rows alternate 2 and 3 hexagons, centred, nested together */
+.hive{container-type:inline-size;max-width:420px;margin:0 auto;padding-bottom:6px;}
+.hive-row{display:flex;margin-top:calc(-9.62% + 4px);}
+.hive-row:first-child{margin-top:0;}
+.hive-row.s2 .hexw:first-child{margin-left:calc(100% / 6 + 2px);}
+.hive-row.one .hexw:first-child{margin-left:calc(100% / 3 + 2px);}
+.hexw{position:relative;width:calc(100% / 3 - 4px);margin:0 2px;aspect-ratio:0.866;pointer-events:none;flex:none;}
+.hex,.hexin{clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);}
+.hex{position:absolute;inset:0;pointer-events:auto;cursor:pointer;touch-action:manipulation;transition:transform .12s,filter .12s;-webkit-tap-highlight-color:transparent;}
+.hex:active{transform:scale(.94);filter:brightness(1.25);}
+.hexin{position:absolute;inset:2px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:0 10%;text-align:center;}
+.hexin .hi{font-size:clamp(20px,8.5cqw,34px);line-height:1;}
+.hexin .hl{font-size:clamp(9.5px,2.9cqw,13px);font-weight:600;color:#e2e8f0;line-height:1.15;}
+.hexb{position:absolute;top:9%;right:17%;min-width:20px;height:20px;padding:0 4px;box-sizing:border-box;background:#ef4444;color:#fff;border-radius:10px;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none;border:2px solid #0a1628;}
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
 .g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
 .sc{background:#0f1f38;border-radius:12px;border:1px solid #1e3a5f;padding:16px;}
@@ -455,7 +469,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.8.0";
+const APP_VERSION = "6.11.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -3251,10 +3265,12 @@ function rsSync(extra){                                        // tell the phone
   rs.ref.update(d).catch(function(){});
   rsUpdatePill();
 }
-function rsReport(ok, text){                                   // the answer the phone shows under "Sent"
+function rsReport(ok, text, prod){                             // the answer the phone shows under "Sent" (plus the product's details, when there is one)
   var rs = S._rs; if(!rs || rs.closed) return;
   rs.resultN++;
-  rsSync({result:{n:rs.resultN, ok:!!ok, text:String(text||""), code:rs.last||""}});
+  var res = {n:rs.resultN, ok:!!ok, text:String(text||""), code:rs.last||""};
+  if(prod) res.product = {name:String(prod.name||""), category:String(prod.category||""), unit:String(prod.unit||""), qty:Number(prod.qty)||0, lowAt:Number(prod.lowAt)||0};
+  rsSync({result:res});
 }
 function rsOnSnap(snap){
   var rs = S._rs; if(!rs || rs.closed || !snap) return;
@@ -3302,7 +3318,7 @@ async function rsHandleScan(code){
   }
   if(rs.kind==="register"){ await rsRegister(code); return; }
   if(rs.kind==="lookup"){
-    if(p){ scanBeep("ok"); rs.assign = null; rsReport(true, "✓ "+p.name); rs.hidden = true; var el = document.getElementById("rs-modal"); if(el) el.remove(); rsUpdatePill(); rsShowCard(p.id); return; }
+    if(p){ scanBeep("ok"); rs.assign = null; rsReport(true, "✓ "+p.name, p); rs.hidden = true; var el = document.getElementById("rs-modal"); if(el) el.remove(); rsUpdatePill(); rsShowCard(p.id); return; }
     if(!canManageProducts()){
       scanBeep("no"); rs.msg = {bad:true, text:"No product has the barcode "+code+". Ask a manager to add it."}; rsReport(false, "⚠ Not in the system - ask a manager to add it");
       rs.hidden = false; rsShowModal(); return;
@@ -3316,11 +3332,11 @@ async function rsHandleScan(code){
     if(!S.cart) S.cart = {};
     S.cart[p.id] = (S.cart[p.id]||0)+1; lsSet("hub:cart", S.cart); updateCartBadge();
     rs.cart[p.id] = (rs.cart[p.id]||0)+1;
-    rsReport(true, "✓ "+p.name+" (cart: "+S.cart[p.id]+")");
+    rsReport(true, "✓ "+p.name+" (cart: "+S.cart[p.id]+")", p);
     if(S.tab==="checkout") renderCheckout();
   } else if(rs.kind==="count"){
     rs.tally[p.id] = (rs.tally[p.id]||0)+1;
-    rsReport(true, "✓ "+p.name+" (counted: "+rs.tally[p.id]+")");
+    rsReport(true, "✓ "+p.name+" (counted: "+rs.tally[p.id]+")", p);
   }
   scanBeep("ok"); rsRenderList(); rsUpdatePill();
 }
@@ -3338,7 +3354,7 @@ async function rsRegister(code){
     prod.upc = code; lsSet("hub:products", S.products);
     await gs("updateProductUpcServer", {id:prod.id, upc:code});
     scanBeep("ok"); var nm = prod.name;
-    rs.kind = "lookup"; rs.productId = null; rsReport(true, "✓ Saved to "+nm);          // back to looking up: the phone stays ready for the next scan
+    rs.kind = "lookup"; rs.productId = null; rsReport(true, "✓ Saved to "+nm, prod);          // back to looking up: the phone stays ready for the next scan
     if(S.tab==="inventory") renderInv();
     showToast("Barcode saved for "+nm);
     rsHide();
@@ -3615,7 +3631,7 @@ async function rsPhoneBoot(code){
     +"<div id='rsp-status' style='font-size:14px;color:#94a3b8;margin-bottom:12px;'>Connecting...</div>"
     +"<div id='rsp-cam' style='display:none;'><div id='rsp-reader' style='width:100%;max-width:360px;height:240px;margin:0 auto;background:#000;border-radius:12px;overflow:hidden;'></div></div>"
     +"<div id='rsp-last' style='margin:14px 0 2px;font-size:14px;color:#94a3b8;min-height:20px;'></div>"
-    +"<div id='rsp-result' style='font-size:18px;font-weight:800;min-height:26px;'></div><div id='rsp-count' style='font-size:13px;color:#64748b;margin-top:4px;'></div>"
+    +"<div id='rsp-result' style='font-size:18px;font-weight:800;min-height:26px;'></div><div id='rsp-prod'></div><div id='rsp-count' style='font-size:13px;color:#64748b;margin-top:4px;'></div>"
     +"<div id='rsp-manual' style='display:none;margin-top:16px;gap:6px;justify-content:center;'><input id='rsp-input' autocomplete='off' placeholder='Or type a barcode' style='flex:1;max-width:240px;padding:10px;border-radius:8px;border:1px solid #1e3a5f;background:#0f2040;color:#e2e8f0;font-size:15px;'>"
     +"<button id='rsp-send' style='padding:10px 16px;border-radius:8px;border:none;background:#1e3a8a;color:#fff;font-weight:700;'>Send</button></div>"
     +"<button id='rsp-end' style='margin-top:22px;padding:10px 20px;border-radius:8px;border:1px solid #475569;background:none;color:#94a3b8;font-size:14px;'>End session</button></div>";
@@ -3661,6 +3677,15 @@ async function rsPhoneBoot(code){
     if(dd.result && dd.result.n > lastResultN){
       lastResultN = dd.result.n;
       $("rsp-result").textContent = dd.result.text || ""; $("rsp-result").style.color = dd.result.ok ? "#22c55e" : "#fb923c";
+      var pr = dd.result.product;
+      if(pr){
+        var sc = pr.qty<=0 ? "#ef4444" : pr.qty<=pr.lowAt ? "#f59e0b" : "#22c55e", box = "background:#0a1628;border-radius:10px;padding:10px 6px;";
+        $("rsp-prod").innerHTML = "<div style='margin:10px auto 0;max-width:360px;background:#0f2040;border:1px solid #1e3a5f;border-radius:14px;padding:14px;text-align:left;'>"
+          +"<div style='font-size:17px;font-weight:700;'>"+esc(pr.name)+"</div><div style='font-size:12px;color:#94a3b8;margin:2px 0 12px;'>"+esc(pr.category||"No category")+"</div>"
+          +"<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;text-align:center;'>"
+          +"<div style='"+box+"'><div style='font-size:11px;color:#64748b;margin-bottom:2px;'>IN STOCK</div><div id='rsp-qty' style='font-size:30px;font-weight:800;color:"+sc+";'>"+pr.qty+"</div><div style='font-size:11px;color:#64748b;'>"+esc(pr.unit)+"</div></div>"
+          +"<div style='"+box+"'><div style='font-size:11px;color:#64748b;margin-bottom:2px;'>LOW STOCK AT</div><div id='rsp-low' style='font-size:30px;font-weight:800;color:#94a3b8;'>"+pr.lowAt+"</div><div style='font-size:11px;color:#64748b;'>"+esc(pr.unit)+"</div></div></div></div>";
+      } else $("rsp-prod").innerHTML = "";
     }
     refreshStatus();
   }, function(){});
@@ -3669,7 +3694,7 @@ async function rsPhoneBoot(code){
     if(over) return;
     try {
       await ref.update({scans:firebase.firestore.FieldValue.arrayUnion({id:"s"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), upc:codeText, at:new Date().toISOString()}), lastSeen:new Date().toISOString()});
-      sent++; $("rsp-last").textContent = "Sent: "+codeText; $("rsp-result").textContent = ""; $("rsp-count").textContent = sent+" scan"+(sent===1?"":"s")+" sent";
+      sent++; $("rsp-last").textContent = "Sent: "+codeText; $("rsp-result").textContent = ""; $("rsp-prod").innerHTML = ""; $("rsp-count").textContent = sent+" scan"+(sent===1?"":"s")+" sent";
       try { if(navigator.vibrate) navigator.vibrate(60); } catch(x){}
     } catch(err){ fail("This scanning session has ended. Scan the QR code on the computer again."); }
   };
@@ -7309,17 +7334,22 @@ function renderDash(){
     ? "<img src='"+photo+"' style='width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #f59e0b;'>"
     : "<div style='width:64px;height:64px;border-radius:50%;background:#1e3a5f;border:3px solid #f59e0b;display:flex;align-items:center;justify-content:center;font-size:28px;'>"+name.charAt(0).toUpperCase()+"</div>";
 
-  var tilesHtml = tiles.map(function(t){
-    var badgeHtml = t.badge>0 ? "<div style='position:absolute;top:8px;right:8px;background:#ef4444;color:#fff;border-radius:50%;width:20px;height:20px;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;'>"+t.badge+"</div>" : "";
+  var hexHtml = function(t){
+    var badgeHtml = t.badge>0 ? "<div class='hexb'>"+t.badge+"</div>" : "";
     var tileAction = t.tab==="__scan__" ? "data-a='quick-scan'" : "data-a='tab' data-v='"+t.tab+"'";
-    return "<div "+tileAction+" style='position:relative;background:"+t.color+";border:1px solid "+t.accent+"33;border-radius:16px;padding:20px 10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;cursor:pointer;min-height:90px;touch-action:manipulation;'>"
-      +"<div style='font-size:28px;'>"+t.icon+"</div>"
-      +"<div style='font-size:12px;font-weight:600;color:#e2e8f0;text-align:center;line-height:1.2;'>"+t.label+"</div>"
-      +badgeHtml
-      +"</div>";
-  }).join("");
+    return "<div class='hexw'><div class='hex' "+tileAction+" title='"+esc(t.label)+"' style='background:"+t.accent+"88;'>"
+      +"<div class='hexin' style='background:"+t.color+";'><div class='hi'>"+t.icon+"</div><div class='hl'>"+esc(t.label)+"</div></div></div>"+badgeHtml+"</div>";
+  };
+  var tilesHtml = "";
+  // rows alternate 2 and 3 hexagons; start with 2 unless that would leave a lone pair in a row of 3 (a pair cannot be centred in it)
+  var hiveRows = function(first){ var out = [], n = 0, slot = first; while(n<tiles.length){ var k = Math.min(slot, tiles.length-n); out.push({slot:slot, tiles:tiles.slice(n, n+k)}); n += k; slot = slot===2 ? 3 : 2; } return out; };
+  var plan = hiveRows(2), lastRow = plan[plan.length-1];
+  if(lastRow.slot===3 && lastRow.tiles.length===2) plan = hiveRows(3);
+  plan.forEach(function(row){
+    tilesHtml += "<div class='hive-row"+(row.slot===2 ? " s2" : "")+(row.tiles.length===1 ? " one" : "")+"'>"+row.tiles.map(hexHtml).join("")+"</div>";
+  });
   if(!tiles.length){
-    tilesHtml = "<div style='grid-column:1/-1;text-align:center;color:#64748b;padding:30px 10px;font-size:14px;'>Nothing is available on your home screen yet.<br>Ask your manager if you need access to something.</div>";
+    tilesHtml = "<div style='text-align:center;color:#64748b;padding:30px 10px;font-size:14px;'>Nothing is available on your home screen yet.<br>Ask your manager if you need access to something.</div>";
   }
 
   pg.innerHTML = ""
@@ -7349,10 +7379,8 @@ function renderDash(){
         +"</div>"
       :"")
 
-    // Nav grid
-    +"<div style='display:grid;grid-template-columns:repeat("+cols+",1fr);gap:12px;'>"
-    +tilesHtml
-    +"</div>";
+    // Home Screen honeycomb
+    +"<div class='hive'>"+tilesHtml+"</div>";
 }
 
 
