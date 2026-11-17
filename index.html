@@ -469,7 +469,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.11.0";
+const APP_VERSION = "6.12.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -6782,6 +6782,8 @@ async function handleAction(a,v,el,e){
         }
       }
     });
+    var raEl=document.querySelector("[data-ra-score]");
+    if(raEl){ var raT=raScore(S._raData); raEl.textContent=raT+"%"; raEl.style.color=qaScoreColor(raT); }
     return;
   }
   if(a==="sign-view") { S._signView=v; renderSign(); return; }
@@ -6894,29 +6896,19 @@ async function handleAction(a,v,el,e){
     var field = parts[0], answer = parts[1];
     if(!S._qaData) S._qaData={};
     S._qaData[field] = answer;
-
+    var qit = qaItems().find(function(i){ return i.k===field; })||{};
     // Update buttons in place without re-rendering
-    var scoreMap = {D9:0,D10:2,D11:5,D12:3,D13:3,D14:0,D16:4,D17:4,D18:5,D19:5,D20:5,D21:5,D22:5,D23:3,D26:5,D27:5,D28:4,D29:3,D30:5,D31:4,D32:5,D35:10,D36:10};
-    // Update yes button
-    var yesBtn = document.querySelector("[data-a='qa-answer'][data-v='"+field+"|yes']");
-    var noBtn = document.querySelector("[data-a='qa-answer'][data-v='"+field+"|no']");
-    if(yesBtn && noBtn){
-      if(answer==="yes"){
-        yesBtn.className="btn bs"; yesBtn.style.borderColor="#22c55e";
-        noBtn.className="btn bg"; noBtn.style.borderColor="";
-      } else {
-        noBtn.className="btn bd";
-        yesBtn.className="btn bg"; yesBtn.style.borderColor="";
-      }
-    }
-    // Update score display
-    var total=0;
-    Object.keys(scoreMap).forEach(function(k){ if(S._qaData[k]==="yes") total+=scoreMap[k]; });
+    ["yes","no","na"].forEach(function(opt){
+      var btn = document.querySelector("[data-a='qa-answer'][data-v='"+field+"|"+opt+"']");
+      if(!btn) return;
+      var on = (opt===answer);
+      var good = (opt==="no" ? !!qit.onNo : opt==="yes");
+      btn.className = !on ? "btn bg" : opt==="na" ? "btn bp" : good ? "btn bs" : "btn bd";
+      btn.style.borderColor = (on && good && opt!=="na") ? "#22c55e" : "";
+    });
+    var total = qaScore(S._qaData);
     var scoreEl=document.querySelector("[data-score-display]");
-    if(scoreEl){
-      scoreEl.textContent=total;
-      scoreEl.style.color=total>=80?"#22c55e":total>=60?"#f59e0b":"#ef4444";
-    }
+    if(scoreEl){ scoreEl.textContent=total+"%"; scoreEl.style.color=qaScoreColor(total); }
     return;
   }
   if(a==="ms-submit") { submitMultiSign(); return; }
@@ -12166,6 +12158,7 @@ async function generateQARAPdf(data){
     drawText("Technician: "+(fd.tech||data.techName||""), margin, y, 11, true); y-=16;
     drawText("Date: "+(fd.date||""), margin, y, 11); y-=16;
     drawText("Manager: "+(fd.manager||data.createdBy||""), margin, y, 11); y-=16;
+    if(fd.account||fd.customer) { drawText("Account #: "+(fd.account||"")+"    Customer: "+(fd.customer||""), margin, y, 11); y-=16; }
     if(fd.timein||fd.timeout) { drawText("Time: "+(fd.timein||"")+" — "+(fd.timeout||""), margin, y, 11); y-=16; }
     y -= 8; drawLine(y); y -= 15;
 
@@ -12192,8 +12185,38 @@ async function generateQARAPdf(data){
       y -= 14;
     }
 
-    if(isQA){
-      // QA Form sections
+    if(fd.v===2){
+      // New layout (11/2026 company sheets)
+      var defSecs = isQA ? QA_DEF.sections : RA_DEF.sections;
+      defSecs.forEach(function(sc){
+        drawSection(sc.title.toUpperCase());
+        sc.items.forEach(function(it){
+          var lab = it.t.length>88 ? it.t.substring(0,85)+"..." : it.t;
+          if(isQA){
+            checkY(20);
+            var qv = fd[it.k]||"";
+            var qcol = qv==="yes"?PDFLib.rgb(0.13,0.69,0.3):qv==="no"?PDFLib.rgb(0.87,0.15,0.15):PDFLib.rgb(0.5,0.5,0.5);
+            drawText(lab, margin+4, y, 8, false, PDFLib.rgb(0.1,0.1,0.1));
+            drawText(qv?(qv==="na"?"N/A":qv.toUpperCase()):"\u2014", pageW-margin-40, y, 9, true, qcol);
+            y -= 13;
+          } else {
+            drawItem(lab, it.k);
+          }
+        });
+        if(sc.cm) drawComment("Comments", fd[sc.cm]);
+        y -= 6;
+      });
+      if(!isQA && fd.summary) drawComment("Ride-Along Summary", fd.summary);
+      y -= 6;
+      if(fd.total !== undefined){
+        checkY(30);
+        var sc2 = fd.total>=80?PDFLib.rgb(0.13,0.69,0.3):fd.total>=60?PDFLib.rgb(0.96,0.62,0.04):PDFLib.rgb(0.87,0.15,0.15);
+        drawRect(margin, y-5, pageW-margin*2, 25, PDFLib.rgb(0.94,0.94,0.94));
+        drawText("TOTAL SCORE: "+fd.total+"%", margin+8, y+5, 13, true, sc2);
+        y -= 35;
+      }
+    } else if(isQA){
+      // QA Form sections (older layout)
       drawSection("CUSTOMER INTERVIEW");
       drawItem("Were you home when tech arrived?","D9");
       drawItem("Did you know the tech's name?","D10");
@@ -13110,7 +13133,21 @@ function renderSignTech(pg){
         +pending.map(function(r){
           // Build read-only form summary
         var formPreview = "";
-        if(r.isQA && r.qaData){
+        if(r.isQA && r.qaData && r.qaData.v===2){
+          var qd2 = r.qaData;
+          var qa2 = function(it){ var v=qd2[it.k]; return v==="yes"?"<span style='color:#22c55e;font-weight:700;'>YES</span>":v==="no"?"<span style='color:"+(it.onNo?"#22c55e":"#ef4444")+";font-weight:700;'>NO</span>":v==="na"?"<span style='color:#94a3b8;'>N/A</span>":"<span style='color:#64748b;'>&mdash;</span>"; };
+          formPreview = "<div style='margin-top:10px;padding:10px;background:#0a1628;border-radius:8px;font-size:12px;'>"
+            +"<div style='font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:8px;'>QA Results (Read Only)</div>"
+            +((qd2.account||qd2.customer)?"<div style='margin-bottom:6px;color:#94a3b8;'>"+esc(qd2.account||"")+(qd2.account&&qd2.customer?" &bull; ":"")+esc(qd2.customer||"")+"</div>":"")
+            +QA_DEF.sections.map(function(sc,si){
+              return "<div style='color:#64748b;margin-top:"+(si?8:0)+"px;margin-bottom:4px;font-weight:600;'>"+esc(sc.title)+"</div>"
+                +sc.items.map(function(it){ return "<div style='margin-bottom:2px;'>"+esc(it.t.length>70?it.t.substring(0,68)+"\u2026":it.t)+": "+qa2(it)+"</div>"; }).join("")
+                +(sc.cm&&qd2[sc.cm]?"<div style='color:#94a3b8;margin-top:4px;font-style:italic;'>"+esc(qd2[sc.cm])+"</div>":"");
+            }).join("")
+            +"<div style='margin-top:8px;padding:6px;background:#1c2d1a;border-radius:6px;text-align:center;'>"
+            +"<span style='font-weight:700;font-size:16px;color:"+qaScoreColor(qd2.total)+";'>Score: "+qd2.total+"%</span></div>"
+            +"</div>";
+        } else if(r.isQA && r.qaData){
           var qd = r.qaData;
           function ql(v){ return v==="yes"?"<span style='color:#22c55e;font-weight:700;'>YES</span>":"<span style='color:#ef4444;'>NO</span>"; }
           formPreview = "<div style='margin-top:10px;padding:10px;background:#0a1628;border-radius:8px;font-size:12px;'>"
@@ -13146,6 +13183,19 @@ function renderSignTech(pg){
             +(qd.comments4?"<div style='color:#94a3b8;margin-top:4px;font-style:italic;'>"+esc(qd.comments4)+"</div>":"")
             +"<div style='margin-top:8px;padding:6px;background:#1c2d1a;border-radius:6px;text-align:center;'>"
             +"<span style='font-weight:700;font-size:16px;color:"+(qd.total>=80?"#22c55e":qd.total>=60?"#f59e0b":"#ef4444")+";'>Score: "+qd.total+"/100</span></div>"
+            +"</div>";
+        } else if(r.isRA && r.raData && r.raData.v===2){
+          var rd2 = r.raData;
+          var ra2 = function(v){ return v==="exceeds"?"<span style='color:#22c55e;font-weight:700;'>EXCEEDS</span>":v==="meets"?"<span style='color:#3b82f6;font-weight:700;'>MEETS</span>":v==="below"?"<span style='color:#ef4444;font-weight:700;'>BELOW</span>":"<span style='color:#64748b;'>&mdash;</span>"; };
+          formPreview = "<div style='margin-top:10px;padding:10px;background:#0a1628;border-radius:8px;font-size:12px;'>"
+            +"<div style='font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:8px;'>Ride Along Results (Read Only)</div>"
+            +RA_DEF.sections.map(function(sc,si){
+              return "<div style='color:#64748b;margin-top:"+(si?8:0)+"px;margin-bottom:4px;font-weight:600;'>"+esc(sc.title)+"</div>"
+                +sc.items.map(function(it){ return "<div style='margin-bottom:2px;'>"+esc(it.t.length>70?it.t.substring(0,68)+"\u2026":it.t)+": "+ra2(rd2[it.k])+"</div>"; }).join("");
+            }).join("")
+            +(rd2.summary?"<div style='color:#94a3b8;margin-top:8px;font-style:italic;'>"+esc(rd2.summary)+"</div>":"")
+            +"<div style='margin-top:8px;padding:6px;background:#1c2d1a;border-radius:6px;text-align:center;'>"
+            +"<span style='font-weight:700;font-size:16px;color:"+qaScoreColor(rd2.total)+";'>Score: "+rd2.total+"%</span></div>"
             +"</div>";
         } else if(r.isRA && r.raData){
           var rd = r.raData;
@@ -13753,105 +13803,159 @@ async function signSubmitTech(){
 }
 
 
+
+// ─── QA / Ride Along form definitions (match the company sheets updated 11/2026) ───
+// key = column + sheet row (QA answers are in column D, RA ratings use "R"+row).
+var QA_DEF = {
+  sections:[
+    {title:"Customer Interview", color:"#3b82f6", items:[
+      {k:"D9",  t:"Were you home during your HPP service?", p:0},
+      {k:"D10", t:"Do you know your technician's name?", p:3, na:1},
+      {k:"D11", t:"Was your service completed on time? If not, did you receive notification we were running behind?", p:4},
+      {k:"D12", t:"Did our technician text or call you prior to arrival?", p:3},
+      {k:"D13", t:"Did our technician ask if you had any concerns prior to beginning your service? (if customer not home, mark yes)", p:5, na:1},
+      {k:"D14", t:"Did our technician discuss the treatment prior to beginning service? (if customer not home, mark yes)", p:3, na:1},
+      {k:"D15", t:"Are you aware of your included Target Treatments between regular services?", p:3},
+      {k:"D16", t:"Is there anything we can do to improve your customer experience?", p:2, onNo:1}
+    ]},
+    {title:"Quality Service Inspection", color:"#f59e0b", cm:"comments2", cmCell:"B24", items:[
+      {k:"D18", t:"Was pest activity addressed, not including spider webs? (check notes / product screen)", p:5},
+      {k:"D19", t:"Was a web pass completed? (all visible / accessible webs removed from home, if applicable)", p:5, na:1},
+      {k:"D20", t:"Was a rodent pass completed? (check for entry points, bait station refills/installs, etc.)", p:5},
+      {k:"D21", t:"Was a liquid / dust pass performed? (if applicable) (check notes)", p:5},
+      {k:"D22", t:"Was a granular application performed? (if applicable) (check notes)", p:5, na:1},
+      {k:"D23", t:"“What else” opportunities?", p:5}
+    ]},
+    {title:"Service Wrap Up", color:"#22c55e", cm:"comments3", cmCell:"B36", items:[
+      {k:"D26", t:"Reported back to the customer (curbside call if not home)", p:5},
+      {k:"D27", t:"Do technician notes align with customer concerns? (if customer not home, did they align with prior notes / appt. notes)", p:1},
+      {k:"D28", t:"Did technician notate what they SAW during service?", p:1},
+      {k:"D29", t:"Did technician notate what they DID during service?", p:1},
+      {k:"D30", t:"Did technician note any conducive conditions or recommendation & properly notate what they RECOMMEND during service?", p:1},
+      {k:"D31", t:"Did technician notate what customer can EXPECT after service?", p:1},
+      {k:"D32", t:"Check in/out times correct and aligned with service performed and time on stop expectations.", p:5},
+      {k:"D33", t:"Work order signed by Technician and Customer (if available)?", p:4},
+      {k:"D34", t:"Were photos added to the work order?", p:4},
+      {k:"D35", t:"Placed required Yard Sign and Door Stickers?", p:4}
+    ]},
+    {title:"Required Documentation", color:"#a855f7", cm:"comments4", cmCell:"B40", items:[
+      {k:"D38", t:"Proper Application Method", p:10},
+      {k:"D39", t:"Product Usage recorded accurately", p:10}
+    ]}
+  ]
+};
+var RA_DEF = {
+  max:54,   // the company sheet divides the point total by 54
+  sections:[
+    {title:"Safety, Compliance & Professionalism", color:"#3b82f6", items:[
+      {k:"R9",  t:"Uniform clean / well groomed (hat, belt, tucked in, shoe covers)"},
+      {k:"R10", t:"Truck clean and organized per expectations"},
+      {k:"R11", t:"Properly equipped and supplied, and equipment in good working condition"},
+      {k:"R12", t:"Materials stored properly (locked boxes, not in cab of truck)"},
+      {k:"R13", t:"Safe driving practices: (braking/acceleration, parking, focused driving)"},
+      {k:"R14", t:"On-My-Way button and text/call completed prior to arrival"},
+      {k:"R15", t:"Arrived in proper time frame or else notified customer, confirmed customer received notifications"},
+      {k:"R16", t:"Asked questions, listened, took notes (2 ears / one mouth)"},
+      {k:"R17", t:"Discussed 5-pass service with customer"},
+      {k:"R18", t:"Discussed Welcome Sheet and Billing (if initial)"},
+      {k:"R19", t:"Looked over prior service notes and followed up with customer (if applicable)"}
+    ]},
+    {title:"Quality Service & Service Wrap-Up", color:"#f59e0b", items:[
+      {k:"R21", t:"Completed a thorough inspection, beginning with customer's concerns"},
+      {k:"R22", t:"Showed our value: What Else Initiative, looked for other ways to “WOW!” our customer"},
+      {k:"R23", t:"Focused upon seasonal pests, conducive conditions, and application methods and areas"},
+      {k:"R24", t:"Performed Safety Lap, followed by proper 5-pass procedure"},
+      {k:"R25", t:"Demonstrated the knowledge and skill necessary for World Class Service"},
+      {k:"R26", t:"Proper mixing and application of products and materials"},
+      {k:"R27", t:"Addressed current pest activity / customer concerns"},
+      {k:"R28", t:"Gates and doors closed (close them behind you every time - leave it like you found it - if applicable)"},
+      {k:"R29", t:"Reported back to the customer (curbside call if not home)"},
+      {k:"R30", t:"Explained the details of the inspection, what was found, & did tech set expectations"},
+      {k:"R31", t:"Entered thorough notes into FieldRoutes following 4-part note format with photos"},
+      {k:"R32", t:"Discussed additional service options / recommendations as identified during the inspection"},
+      {k:"R33", t:"Setting expectations (included target treatments, pest reduction, follow-up needed, etc.)"}
+    ]},
+    {title:"Required Documentation", color:"#a855f7", items:[
+      {k:"R35", t:"Equipment"},
+      {k:"R36", t:"Product Safety / Handling / Usage"},
+      {k:"R37", t:"Inspections - Interior / Exterior"}
+    ]}
+  ]
+};
+function qaItems(){ var a=[]; QA_DEF.sections.forEach(function(sc){ sc.items.forEach(function(i){ a.push(i); }); }); return a; }
+function raItems(){ var a=[]; RA_DEF.sections.forEach(function(sc){ sc.items.forEach(function(i){ a.push(i); }); }); return a; }
+// QA score (percent): points earned / 100 possible. "N/A" earns nothing; the last interview question scores on NO.
+function qaScore(d){
+  var earned=0, possible=0;
+  qaItems().forEach(function(i){
+    possible+=i.p;
+    var v=d[i.k];
+    if(i.onNo ? v==="no" : v==="yes") earned+=i.p;
+  });
+  return possible ? Math.round(earned/possible*1000)/10 : 0;
+}
+// RA score (percent): Below 1 / Meets 2 / Exceeds 3 points, divided by 54 (as the company sheet does).
+function raScore(d){
+  var pts=0;
+  raItems().forEach(function(i){ var v=d[i.k]; pts += v==="below"?1 : v==="meets"?2 : v==="exceeds"?3 : 0; });
+  return Math.round(pts/RA_DEF.max*1000)/10;
+}
+function qaScoreColor(t){ return t>=80?"#22c55e":t>=60?"#f59e0b":"#ef4444"; }
+
 function renderQAForm(pg){
   var d = S._qaData||{};
   var techOpts = (S.techAccounts||[]).map(function(t){
     return "<option value='"+esc(t.name)+"'"+(d.tech===t.name?" selected":"")+">"+esc(t.name)+"</option>";
   }).join("");
 
-  function yesno(field, score){
-    var val = d[field];
-    return "<div style='display:flex;gap:8px;'>"
-      +"<button class='btn "+(val==="yes"?"bs":"bg")+"' style='flex:1;padding:8px;font-size:13px;"+(val==="yes"?"border-color:#22c55e;":"")+";' data-a='qa-answer' data-v='"+field+"|yes'>"
-      +"Yes"+(score>0?" (+"+score+")":"")+"</button>"
-      +"<button class='btn "+(val==="no"?"bd":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='qa-answer' data-v='"+field+"|no'>No</button>"
-      +"</div>";
+  function answerBtns(it){
+    var val = d[it.k];
+    var pts = it.p>0 ? " (+"+it.p+")" : "";
+    var yesLabel = it.onNo ? "Yes" : "Yes"+pts;
+    var noLabel  = it.onNo ? "No"+pts : "No";
+    var h = "<div style='display:flex;gap:8px;'>"
+      +"<button class='btn "+(val==="yes"?"bs":"bg")+"' style='flex:1;padding:8px;font-size:13px;"+(val==="yes"?"border-color:#22c55e;":"")+"' data-a='qa-answer' data-v='"+it.k+"|yes'>"+yesLabel+"</button>"
+      +"<button class='btn "+(val==="no"?(it.onNo?"bs":"bd"):"bg")+"' style='flex:1;padding:8px;font-size:13px;"+(val==="no"&&it.onNo?"border-color:#22c55e;":"")+"' data-a='qa-answer' data-v='"+it.k+"|no'>"+noLabel+"</button>";
+    if(it.na) h += "<button class='btn "+(val==="na"?"bp":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='qa-answer' data-v='"+it.k+"|na'>N/A</button>";
+    return h+"</div>";
   }
-
-  // Calculate score
-  var scoreMap = {D9:0,D10:2,D11:5,D12:3,D13:3,D14:0,D16:4,D17:4,D18:5,D19:5,D20:5,D21:5,D22:5,D23:3,D26:5,D27:5,D28:4,D29:3,D30:5,D31:4,D32:5,D35:10,D36:10};
-  var total = 0;
-  Object.keys(scoreMap).forEach(function(k){ if(d[k]==="yes") total+=scoreMap[k]; });
-
   function section(title, color){
     return "<div style='font-size:13px;font-weight:700;color:"+color+";text-transform:uppercase;letter-spacing:.05em;margin:16px 0 8px;padding-bottom:4px;border-bottom:1px solid "+color+"44;'>"+title+"</div>";
   }
-  function item(label, field, score){
-    return "<div style='margin-bottom:10px;'>"
-      +"<div style='font-size:13px;margin-bottom:6px;color:#e2e8f0;'>"+label+"</div>"
-      +yesno(field, score)+"</div>";
-  }
+  function lbl(t){ return "<label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>"+t+"</label>"; }
 
-  pg.innerHTML = "<div style='display:flex;gap:10px;align-items:center;margin-bottom:16px;'>"
+  var total = qaScore(d);
+  var branchName = (S.branch==="spokane"?"Spokane":"Willamette");
+
+  var body = "<div style='display:flex;gap:10px;align-items:center;margin-bottom:16px;'>"
     +"<button class='btn bg' data-a='sign-view' data-v='list'>Back</button>"
     +"<h2 style='font-size:18px;font-weight:700;'>QA Inspection Form</h2></div>"
-
     +"<div class='card' style='margin-bottom:14px;'>"
     +"<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;'>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Technician</label>"
-    +"<select class='inp' style='margin-top:4px;' id='qa-tech'>"+techOpts+"</select></div>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Date</label>"
-    +"<input type='date' class='inp' style='margin-top:4px;' id='qa-date' value='"+(d.date||new Date().toISOString().split("T")[0])+"'></div>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Account #</label>"
-    +"<input type='text' class='inp' style='margin-top:4px;' id='qa-account' placeholder='Account number' value='"+esc(d.account||"")+"'></div>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Customer</label>"
-    +"<input type='text' class='inp' style='margin-top:4px;' id='qa-customer' placeholder='Customer name' value='"+esc(d.customer||"")+"'></div>"
-    +"</div></div>"
+    +"<div>"+lbl("Technician")+"<select class='inp' style='margin-top:4px;' id='qa-tech'>"+techOpts+"</select></div>"
+    +"<div>"+lbl("Date")+"<input type='date' class='inp' style='margin-top:4px;' id='qa-date' value='"+(d.date||new Date().toISOString().split("T")[0])+"'></div>"
+    +"<div>"+lbl("Account #")+"<input type='text' class='inp' style='margin-top:4px;' id='qa-account' placeholder='Account number' value='"+esc(d.account||"")+"'></div>"
+    +"<div>"+lbl("Customer")+"<input type='text' class='inp' style='margin-top:4px;' id='qa-customer' placeholder='Customer name' value='"+esc(d.customer||"")+"'></div>"
+    +"<div style='grid-column:1/3;font-size:12px;color:#64748b;'>Branch: "+esc(branchName)+"</div>"
+    +"</div></div>";
 
-    +section("Customer Interview","#3b82f6")
-    +"<div class='card' style='margin-bottom:14px;'>"
-    +item("Were you home during your HPP service?","D9",0)
-    +item("Do you know your technician's name?","D10",2)
-    +item("Was your service completed on time?","D11",5)
-    +item("Did our technician ask if you had any concerns prior to beginning your service?","D12",3)
-    +item("Did our technician discuss the treatment/follow-up expectations after completion?","D13",3)
-    +item("Is there anything we can do to improve your customer experience?","D14",0)
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Comments</label>"
-    +"<textarea class='inp' rows='2' id='qa-comments1' style='margin-top:4px;font-size:13px;' placeholder='Customer interview comments...'>"+esc(d.comments1||"")+"</textarea></div>"
-    +"</div>"
+  QA_DEF.sections.forEach(function(sc){
+    body += section(sc.title, sc.color)+"<div class='card' style='margin-bottom:14px;'>";
+    sc.items.forEach(function(it){
+      body += "<div style='margin-bottom:10px;'><div style='font-size:13px;margin-bottom:6px;color:#e2e8f0;'>"+esc(it.t)+"</div>"+answerBtns(it)+"</div>";
+    });
+    if(sc.cm){
+      body += "<div>"+lbl("Comments")+"<textarea class='inp' rows='2' id='qa-"+sc.cm+"' style='margin-top:4px;font-size:13px;' placeholder='Comments...'>"+esc(d[sc.cm]||"")+"</textarea></div>";
+    }
+    body += "</div>";
+  });
 
-    +section("Quality Service Inspection","#f59e0b")
-    +"<div class='card' style='margin-bottom:14px;'>"
-    +item("Asked questions, listened, took notes","D16",4)
-    +item("Completed a thorough investigation, beginning with customer concerns","D17",4)
-    +item("Was pest activity addressed not including spider webs?","D18",5)
-    +item("Used webster, removed wasp nest?","D19",5)
-    +item("Were rodent entry points sealed and bait stations serviced?","D20",5)
-    +item("Was a liquid application performed? (check service ticket)","D21",5)
-    +item("Was a granular application performed? (check service ticket)","D22",5)
-    +item("What else opportunities","D23",3)
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Comments</label>"
-    +"<textarea class='inp' rows='2' id='qa-comments2' style='margin-top:4px;font-size:13px;' placeholder='Quality service comments...'>"+esc(d.comments2||"")+"</textarea></div>"
-    +"</div>"
-
-    +section("Service Wrap Up","#22c55e")
-    +"<div class='card' style='margin-bottom:14px;'>"
-    +item("Reported back to the customer (Curbside call if not home)","D26",5)
-    +item("Service note: Personalized to the home and includes the 4 Part Notes?","D27",5)
-    +item("Check in/out times correct and aligned with service performed?","D28",4)
-    +item("Discussed additional service options as identified during the inspection","D29",3)
-    +item("Work order signed by Technician and Customer (if available)?","D30",5)
-    +item("Were photos added to the work order?","D31",4)
-    +item("Placed required Yard Sign and Door Stickers?","D32",5)
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Comments</label>"
-    +"<textarea class='inp' rows='2' id='qa-comments3' style='margin-top:4px;font-size:13px;' placeholder='Service wrap up comments...'>"+esc(d.comments3||"")+"</textarea></div>"
-    +"</div>"
-
-    +section("Required Documentation","#a855f7")
-    +"<div class='card' style='margin-bottom:14px;'>"
-    +item("Proper Application Method","D35",10)
-    +item("Product Usage recorded accurately","D36",10)
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Comments</label>"
-    +"<textarea class='inp' rows='2' id='qa-comments4' style='margin-top:4px;font-size:13px;' placeholder='Documentation comments...'>"+esc(d.comments4||"")+"</textarea></div>"
-    +"</div>"
-
-    +"<div class='card' style='margin-bottom:16px;padding:16px;text-align:center;'>"
+  body += "<div class='card' style='margin-bottom:16px;padding:16px;text-align:center;'>"
     +"<div style='font-size:13px;color:#64748b;margin-bottom:4px;'>Overall Score</div>"
-    +"<div style='font-size:36px;font-weight:700;color:"+(total>=80?"#22c55e":total>=60?"#f59e0b":"#ef4444")+";' data-score-display>"+total+"</div>"
-    +"<div style='font-size:12px;color:#64748b;'>out of 100</div>"
+    +"<div style='font-size:36px;font-weight:700;color:"+qaScoreColor(total)+";' data-score-display>"+total+"%</div>"
     +"</div>"
-
     +"<button class='btn bp' style='width:100%;padding:14px;font-size:15px;' data-a='sign-qa-submit'>Next: Manager Signature &#x2192;</button>";
+  pg.innerHTML = body;
 }
 
 async function submitQAForm(){
@@ -13863,7 +13967,6 @@ async function submitQAForm(){
   if(dateSel) d.date = dateSel.value;
   d.account = (document.getElementById("qa-account")||{}).value||"";
   d.customer = (document.getElementById("qa-customer")||{}).value||"";
-  d.comments1 = (document.getElementById("qa-comments1")||{}).value||"";
   d.comments2 = (document.getElementById("qa-comments2")||{}).value||"";
   d.comments3 = (document.getElementById("qa-comments3")||{}).value||"";
   d.comments4 = (document.getElementById("qa-comments4")||{}).value||"";
@@ -13871,9 +13974,10 @@ async function submitQAForm(){
 
   if(!d.tech){ alert("Please select a technician."); return; }
 
-  var scoreMap = {D9:0,D10:2,D11:5,D12:3,D13:3,D14:0,D16:4,D17:4,D18:5,D19:5,D20:5,D21:5,D22:5,D23:3,D26:5,D27:5,D28:4,D29:3,D30:5,D31:4,D32:5,D35:10,D36:10};
-  var total = 0;
-  Object.keys(scoreMap).forEach(function(k){ if(d[k]==="yes") total+=scoreMap[k]; });
+  var unanswered = qaItems().filter(function(i){ return !d[i.k]; }).length;
+  if(unanswered>0 && !confirm(unanswered+" question"+(unanswered===1?" is":"s are")+" not answered yet and will score 0. Continue anyway?")) return;
+  d.v = 2;                       // form layout version (11/2026 sheets)
+  var total = qaScore(d);
   d.total = total;
 
   // Show loading overlay
@@ -13912,7 +14016,7 @@ async function submitQAForm(){
       docName: fileName,
       status: "Pending",
       createdBy: S.managerName,
-      note: "QA Score: "+total+"/100",
+      note: "QA Score: "+total+"%",
       isQA: true,
       qaData: d,
       fileId: null
@@ -13933,79 +14037,49 @@ function renderRAForm(pg){
     return "<option value='"+esc(t.name)+"'"+(d.tech===t.name?" selected":"")+">"+esc(t.name)+"</option>";
   }).join("");
 
-  function raItem(label, field){
-    var val = d[field]||"";
+  function raItem(it){
+    var val = d[it.k]||"";
     return "<div style='margin-bottom:12px;'>"
-      +"<div style='font-size:13px;margin-bottom:6px;color:#e2e8f0;'>"+label+"</div>"
+      +"<div style='font-size:13px;margin-bottom:6px;color:#e2e8f0;'>"+esc(it.t)+"</div>"
       +"<div style='display:flex;gap:8px;'>"
-      +"<button class='btn "+(val==="below"?"bd":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='ra-answer' data-v='"+field+"|below'>Below</button>"
-      +"<button class='btn "+(val==="meets"?"bp":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='ra-answer' data-v='"+field+"|meets'>Meets</button>"
-      +"<button class='btn "+(val==="exceeds"?"bs":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='ra-answer' data-v='"+field+"|exceeds'>Exceeds</button>"
+      +"<button class='btn "+(val==="below"?"bd":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='ra-answer' data-v='"+it.k+"|below'>Below</button>"
+      +"<button class='btn "+(val==="meets"?"bp":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='ra-answer' data-v='"+it.k+"|meets'>Meets</button>"
+      +"<button class='btn "+(val==="exceeds"?"bs":"bg")+"' style='flex:1;padding:8px;font-size:13px;' data-a='ra-answer' data-v='"+it.k+"|exceeds'>Exceeds</button>"
       +"</div></div>";
   }
-
   function section(title, color){
     return "<div style='font-size:13px;font-weight:700;color:"+color+";text-transform:uppercase;letter-spacing:.05em;margin:16px 0 8px;padding-bottom:4px;border-bottom:1px solid "+color+"44;'>"+title+"</div>";
   }
+  function lbl(t){ return "<label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>"+t+"</label>"; }
+  var total = raScore(d);
+  var branchName = (S.branch==="spokane"?"Spokane":"Willamette");
 
-  pg.innerHTML = "<div style='display:flex;gap:10px;align-items:center;margin-bottom:16px;'>"
+  var body = "<div style='display:flex;gap:10px;align-items:center;margin-bottom:16px;'>"
     +"<button class='btn bg' data-a='sign-view' data-v='list'>Back</button>"
     +"<h2 style='font-size:18px;font-weight:700;'>Ride Along Form</h2></div>"
-
     +"<div class='card' style='margin-bottom:14px;'>"
     +"<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;'>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Technician</label>"
-    +"<select class='inp' style='margin-top:4px;' id='ra-tech'>"+techOpts+"</select></div>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Date</label>"
-    +"<input type='date' class='inp' style='margin-top:4px;' id='ra-date' value='"+(d.date||new Date().toISOString().split("T")[0])+"'></div>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Time In</label>"
-    +"<input type='time' class='inp' style='margin-top:4px;' id='ra-timein' value='"+(d.timein||"")+"'></div>"
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Time Out</label>"
-    +"<input type='time' class='inp' style='margin-top:4px;' id='ra-timeout' value='"+(d.timeout||"")+"'></div>"
-    +"</div></div>"
+    +"<div>"+lbl("Technician")+"<select class='inp' style='margin-top:4px;' id='ra-tech'>"+techOpts+"</select></div>"
+    +"<div>"+lbl("Date")+"<input type='date' class='inp' style='margin-top:4px;' id='ra-date' value='"+(d.date||new Date().toISOString().split("T")[0])+"'></div>"
+    +"<div>"+lbl("Time In")+"<input type='time' class='inp' style='margin-top:4px;' id='ra-timein' value='"+(d.timein24||"")+"'></div>"
+    +"<div>"+lbl("Time Out")+"<input type='time' class='inp' style='margin-top:4px;' id='ra-timeout' value='"+(d.timeout24||"")+"'></div>"
+    +"<div style='grid-column:1/3;font-size:12px;color:#64748b;'>Branch: "+esc(branchName)+"</div>"
+    +"</div></div>";
 
-    +section("Professionalism","#3b82f6")
-    +"<div style='background:#0f1f38;border-radius:10px;padding:14px;margin-bottom:14px;border:1px solid #1e3a5f;font-size:12px;color:#64748b;display:flex;gap:8px;margin-bottom:6px;'>"
-    +"<span style='flex:1;'></span><span style='width:70px;text-align:center;'>Below</span><span style='width:70px;text-align:center;'>Meets</span><span style='width:70px;text-align:center;'>Exceeds</span></div>"
-    +"<div class='card' style='margin-bottom:14px;'>"
-    +raItem("Uniform clean / well groomed","R9")
-    +raItem("Truck clean and organized per expectations","R10")
-    +raItem("Properly equipped and supplied, equipment in good working condition","R11")
-    +raItem("Greeted customer with smile, upbeat attitude, reinforced connection","R12")
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Comments</label>"
-    +"<textarea class='inp' rows='2' id='ra-comments1' style='margin-top:4px;font-size:13px;'>"+esc(d.comments1||"")+"</textarea></div>"
-    +"</div>"
+  RA_DEF.sections.forEach(function(sc){
+    body += section(sc.title, sc.color)+"<div class='card' style='margin-bottom:14px;'>";
+    sc.items.forEach(function(it){ body += raItem(it); });
+    body += "</div>";
+  });
 
-    +section("Quality Service","#f59e0b")
-    +"<div class='card' style='margin-bottom:14px;'>"
-    +raItem("Was expected, arrived on time, or else notified customer","R15")
-    +raItem("Asked questions, listened, took notes","R16")
-    +raItem("Completed a thorough investigation, beginning with customer concerns","R17")
-    +raItem("Showed our value: used websters, removed wasp nest, WOW the customer","R18")
-    +raItem("Focused upon seasonal service targets and pests","R19")
-    +raItem("Demonstrated knowledge and skill for World Class Service","R20")
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Comments</label>"
-    +"<textarea class='inp' rows='2' id='ra-comments2' style='margin-top:4px;font-size:13px;'>"+esc(d.comments2||"")+"</textarea></div>"
-    +"</div>"
-
-    +section("Service Wrap Up","#22c55e")
-    +"<div class='card' style='margin-bottom:14px;'>"
-    +raItem("Reported back to the customer (Curbside call if not home)","R23")
-    +raItem("Explained details of Inspection, what was Found, set Expectations","R24")
-    +raItem("Entered details and comments into the iPad","R25")
-    +raItem("Discussed additional service options identified during inspection","R26")
-    +"<div><label style='font-size:11px;color:#64748b;text-transform:uppercase;font-weight:600;'>Comments</label>"
-    +"<textarea class='inp' rows='2' id='ra-comments3' style='margin-top:4px;font-size:13px;'>"+esc(d.comments3||"")+"</textarea></div>"
-    +"</div>"
-
-    +section("Required Documentation","#a855f7")
-    +"<div class='card' style='margin-bottom:16px;'>"
-    +raItem("Equipment","R29")
-    +raItem("Product Safety / Handling / Usage","R30")
-    +raItem("Inspections - Interior / Exterior","R31")
-    +"</div>"
-
+  body += "<div class='card' style='margin-bottom:14px;'>"
+    +lbl("Ride-Along Summary (required)")
+    +"<textarea class='inp' rows='4' id='ra-summary' style='margin-top:4px;font-size:13px;' placeholder='Summarize the ride-along...'>"+esc(d.summary||"")+"</textarea></div>"
+    +"<div class='card' style='margin-bottom:16px;padding:16px;text-align:center;'>"
+    +"<div style='font-size:13px;color:#64748b;margin-bottom:4px;'>Score</div>"
+    +"<div style='font-size:36px;font-weight:700;color:"+qaScoreColor(total)+";' data-ra-score>"+total+"%</div></div>"
     +"<button class='btn bp' style='width:100%;padding:14px;font-size:15px;' data-a='sign-ra-submit'>Next: Manager Signature &#x2192;</button>";
+  pg.innerHTML = body;
 }
 
 async function submitRAForm(){
@@ -14022,14 +14096,19 @@ async function submitRAForm(){
     h=h%12||12;
     return h+":"+m+" "+ampm;
   }
-  d.timein = to12hr((document.getElementById("ra-timein")||{}).value||"");
-  d.timeout = to12hr((document.getElementById("ra-timeout")||{}).value||"");
-  d.comments1 = (document.getElementById("ra-comments1")||{}).value||"";
-  d.comments2 = (document.getElementById("ra-comments2")||{}).value||"";
-  d.comments3 = (document.getElementById("ra-comments3")||{}).value||"";
+  d.timein24 = (document.getElementById("ra-timein")||{}).value||"";
+  d.timeout24 = (document.getElementById("ra-timeout")||{}).value||"";
+  d.timein = to12hr(d.timein24);
+  d.timeout = to12hr(d.timeout24);
+  d.summary = ((document.getElementById("ra-summary")||{}).value||"").trim();
   S._raData = d;
 
   if(!d.tech){ alert("Please select a technician."); return; }
+  if(!d.summary){ alert("The Ride-Along Summary is required."); return; }
+  var raUn = raItems().filter(function(i){ return !d[i.k]; }).length;
+  if(raUn>0 && !confirm(raUn+" item"+(raUn===1?" is":"s are")+" not rated yet and will score 0. Continue anyway?")) return;
+  d.v = 2;                       // form layout version (11/2026 sheets)
+  d.total = raScore(d);
 
   var overlay = document.createElement("div");
   overlay.id = "ra-loading";
@@ -14059,7 +14138,7 @@ async function submitRAForm(){
       docName: fileName,
       status: "Pending",
       createdBy: S.managerName,
-      note: "Ride Along Form",
+      note: "Ride Along Score: "+d.total+"%",
       isRA: true,
       raData: d,
       fileId: null
