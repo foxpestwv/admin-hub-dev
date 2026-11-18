@@ -469,7 +469,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.13.1";
+const APP_VERSION = "6.13.2";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -5956,6 +5956,7 @@ async function loadBranchList(){
   try {
     var res = await gs("getBranches", null);
     var branches = res&&res.branches||[];
+    if(!branches.length) branches = Object.keys(BRANCHES).map(function(k){ return {id:k, name:BRANCHES[k].name}; });   // never show an empty list
     var icons = {willamette:"🌲", spokane:"🏔"};
     listDiv.innerHTML = branches.map(function(b){
       var icon = icons[b.id]||"🏢";
@@ -5975,7 +5976,9 @@ async function loadBranchList(){
 
 function logout(){
   S._saTool = null; S._sec = null; S._cln = null; S._pin = null;      // the next Super Admin sign-in starts at the console, not inside a tool
-  try { if(_auth && _auth.currentUser && !_auth.currentUser.isAnonymous){ _auth.signOut().then(function(){ return fbSignIn(); }).catch(function(){}); } } catch(e){}
+  // end a secure session, then go back to the quiet anonymous sign-in; the branch list is loaded only after that is done
+  var reauth = Promise.resolve();
+  try { if(_auth && _auth.currentUser && !_auth.currentUser.isAnonymous){ reauth = _auth.signOut().then(function(){ return fbSignIn(); }).catch(function(){}); } } catch(e){}
   S._est = null; S._estView = "list";
   S.role=null; S.currentUser=null; S.checkTech=""; pin=""; loginEmail=""; loginRole="";
   S.branch=null; S.branchName=null; S.branchChosen=false; S._saViewBranch=null;
@@ -5984,7 +5987,7 @@ function logout(){
   var loginDiv = document.getElementById("login");
   loginDiv.style.display="flex";
   var pk1 = document.getElementById("pk1");
-  if(!pk1){ location.reload(); return; }
+  if(!pk1){ reauth.then(function(){ location.reload(); }); return; }
   // Always show branch selector on logout
   var bs = document.getElementById("login-step-branch");
   var es = document.getElementById("login-step-email");
@@ -5997,7 +6000,7 @@ function logout(){
   var disp2 = document.getElementById("login-branch-display");
   if(disp2) disp2.textContent = "Fox Pest Control";
   // Load branch list dynamically
-  loadBranchList();
+  reauth.then(function(){ loadBranchList(); });
 }
 
 // ─── Event Delegation ────────────────────────────────────────────────────────
