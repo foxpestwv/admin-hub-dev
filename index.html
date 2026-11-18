@@ -469,7 +469,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.13.0";
+const APP_VERSION = "6.13.1";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -5918,6 +5918,7 @@ async function adminPinSubmit(){
   if(res.ok){
     _adminFails = 0;
     // Login as super admin
+    S._saTool = null; S._sec = null; S._cln = null; S._saViewBranch = null;
     S.branch = "all";
     S.branchName = "All Branches";
     S.role = "superadmin";
@@ -5973,6 +5974,7 @@ async function loadBranchList(){
 }
 
 function logout(){
+  S._saTool = null; S._sec = null; S._cln = null; S._pin = null;      // the next Super Admin sign-in starts at the console, not inside a tool
   try { if(_auth && _auth.currentUser && !_auth.currentUser.isAnonymous){ _auth.signOut().then(function(){ return fbSignIn(); }).catch(function(){}); } } catch(e){}
   S._est = null; S._estView = "list";
   S.role=null; S.currentUser=null; S.checkTech=""; pin=""; loginEmail=""; loginRole="";
@@ -6108,6 +6110,7 @@ async function handleAction(a,v,el,e){
     S.tab=v; S.inspView="home"; S.invView="list"; S.checkDone=false;
     if(v==="checkout") S._checkView="browse";
     if(v!=="sign"){ S._pendingSignReq=null; S._signView="list"; }
+    if(S.role==="superadmin" && S._saTool && !(S._sec && S._sec.running)){ S._saTool=null; S._cln=null; }   // Home leaves whichever Super Admin tool was open
     render(); return;
   }
   if(a==="nav-back"){
