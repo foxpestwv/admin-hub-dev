@@ -469,7 +469,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.12.0";
+const APP_VERSION = "6.13.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -2013,8 +2013,9 @@ function saWelcomeEmail(mgr, branchName){
 }
 async function saSendWelcome(mgr, branchName){
   if(!mgr || !mgr.email) return {ok:false, error:"This manager has no email address."};
-  if(!(mgr.isTemp && mgr.tempPin)) return {ok:false, error:"already"};
-  var m = saWelcomeEmail(mgr, branchName);
+  var wTmp = tmpPinOf(mgr);
+  if(!(mgr.isTemp && wTmp)) return {ok:false, error: mgr.isTemp ? "nopin" : "already"};
+  var m = saWelcomeEmail(Object.assign({}, mgr, {tempPin:wTmp}), branchName);
   try {
     var res = await estBridge("sendEmail", {to:mgr.email, subject:m.subject, body:m.text, htmlBody:m.html,
       replyTo:(S.currentUser && S.currentUser.email) || "", senderName:"Fox Pest Control"});
@@ -2584,7 +2585,7 @@ async function saTermsSave(){
 }
 
 // ─── Super Admin PIN: changeable, stored as a salted hash (not written in the app's code) ───
-// Until it is changed, the original PIN in SUPER_ADMIN_PIN keeps working. Once changed, only the new one works.
+// The PIN lives only as a salted hash in the database; nothing is written in the app's code.
 var _adminBusy = false, _adminFails = 0, _adminLockedUntil = 0;
 async function saPbkdf2(pin, saltB64){
   var enc = new TextEncoder(), salt = Uint8Array.from(atob(saltB64), function(ch){ return ch.charCodeAt(0); });
@@ -2599,11 +2600,10 @@ async function saVerifyPin(pin){
   var rec;
   try { rec = await saLoadPinRecord(); } catch(err){ return {ok:false, reason:"offline"}; }
   if(rec && rec.hash && rec.salt){ return {ok: (await saPbkdf2(pin, rec.salt))===rec.hash, custom:true}; }
-  return {ok: String(pin)===SUPER_ADMIN_PIN, custom:false};
+  return {ok:false, reason:"nopin"};   // no PIN has been saved: nobody gets in (no PIN is written in the app's code any more)
 }
 function saPinProblem(p, current){
   if(!/^\d{6}$/.test(p)) return "The PIN must be exactly 6 digits.";
-  if(p===SUPER_ADMIN_PIN) return "That is the original PIN, which is written in the app's code. Choose a different one.";
   if(p===current) return "That is already your PIN.";
   if(/^(\d)\1{5}$/.test(p)) return "Don't use the same digit six times.";
   if("0123456789".indexOf(p)>=0 || "9876543210".indexOf(p)>=0) return "Don't use a straight run of numbers (like 123456).";
@@ -2635,13 +2635,89 @@ function renderSaPin(pg){
     +"<h2 style='font-size:20px;font-weight:700;margin-bottom:6px;'>Change Super Admin PIN</h2>"
     +(!p.loaded ? "<div style='color:#64748b;padding:20px;text-align:center;'>Loading...</div>" :
       "<div style='font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:14px;"+(p.custom?"background:#14532d;color:#bbf7d0;":"background:#7f1d1d;color:#fecaca;")+"'>"
-        +(p.custom ? "You are using a custom PIN"+(p.changedAt?" (changed "+esc(new Date(p.changedAt).toLocaleDateString("en-US"))+")":"")+"." : "You are still using the original PIN. It is written in the app's code, so please change it.")+"</div>"
+        +(p.custom ? "A Super Admin PIN is saved"+(p.changedAt?" (changed "+esc(new Date(p.changedAt).toLocaleDateString("en-US"))+")":"")+"." : "No Super Admin PIN is saved on this database.")+"</div>"
       +(p.error ? "<div style='font-size:12px;color:#fb923c;margin-bottom:10px;'>"+esc(p.error)+"</div>" : "")
       +field("pin-old","Current PIN")+field("pin-new","New PIN (6 digits)")+field("pin-new2","Confirm new PIN")
       +"<button class='btn bp' data-a='sat-pin-change' style='width:100%;padding:12px;margin-bottom:14px;'>Change PIN</button>"
       +"<div style='font-size:11px;color:#64748b;line-height:1.5;'>This database ("+(isDevCopy()?"test":"live")+") has its own Super Admin PIN. "
-      +"If you ever forget it, open the Firebase console, go to Firestore &rarr; <b>config</b>, and delete the document named <b>superAdmin</b>. The original PIN works again and you can set a new one.</div>")
+      +"If you ever forget it, open the Firebase console, go to Firestore &rarr; <b>config</b>, and delete the document named <b>superAdmin</b>. The next 6-digit PIN typed on the Super Admin screen becomes the new PIN, so do this only when you are about to sign in.</div>")
     +"</div>";
+}
+
+// ─── Super Admin tool: convert every account to secure sign-in (one time, safe to run again) ───
+async function saSecureOpen(){
+  if(S.role!=="superadmin") return;
+  S._saTool = "secure"; S._sec = {loaded:false, running:false, log:[], flags:{}};
+  renderSuperAdmin();
+  S._sec.flags = await securityFlags(true);
+  S._sec.loaded = true;
+  renderSuperAdmin();
+}
+function renderSaSecure(pg){
+  var c = S._sec || {log:[], flags:{}}, fl = (c.flags && c.flags.branches) || {};
+  var done = Object.keys(fl).filter(function(k){ return fl[k]; });
+  pg.innerHTML = "<div style='padding:16px;max-width:560px;margin:0 auto;'>"
+    +"<button class='btn bg' data-a='sat-back' style='margin-bottom:12px;'>← Super Admin</button>"
+    +"<h2 style='font-size:20px;font-weight:700;margin-bottom:6px;'>Secure sign-in for all accounts</h2>"
+    +"<div style='font-size:13px;color:#94a3b8;line-height:1.5;margin-bottom:14px;'>Gives every manager and technician their own protected sign-in and erases the plain-text PINs from the database. Nobody has to do anything: their email and PIN stay the same. It is safe to run again.</div>"
+    +"<div style='font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:14px;"+(done.length?"background:#14532d;color:#bbf7d0;":"background:#7f1d1d;color:#fecaca;")+"'>"
+    +(done.length ? "Converted branches: "+esc(done.join(", ")) : "No branch has been converted yet.")+"</div>"
+    +"<button class='btn bp' data-a='sa-secure-run' style='width:100%;padding:12px;margin-bottom:14px;'"+(c.running||!c.loaded?" disabled":"")+">"+(c.running?"Working...":"Convert all branches now")+"</button>"
+    +"<div style='font-size:12px;line-height:1.7;color:#cbd5e1;white-space:pre-wrap;background:#0a1628;border-radius:8px;padding:10px;"+(c.log.length?"":"display:none;")+"'>"+esc(c.log.join("\n"))+"</div>"
+    +"<div style='font-size:11px;color:#64748b;line-height:1.5;margin-top:12px;'>Needs the Email/Password sign-in method switched on in this Firebase project. People with no email address or no saved PIN are listed and skipped; a manager can reset their PIN afterwards.</div>"
+    +"</div>";
+}
+async function saSecureRun(){
+  if(S.role!=="superadmin" || !S._sec || S._sec.running) return;
+  if(!confirm("Convert every account in every branch to secure sign-in on this "+(isDevCopy()?"TEST":"LIVE")+" database?\n\nPlain-text PINs are erased afterwards.")) return;
+  var c = S._sec; c.running = true; c.log = ["Starting..."]; renderSuperAdmin();
+  var log = function(m){ c.log.push(m); renderSuperAdmin(); };
+  try {
+    await initFirebase();
+    var ids = Object.keys(BRANCHES);
+    try { var br = await gs("getBranches", null); ((br && br.branches)||[]).forEach(function(b){ if(ids.indexOf(b.id)<0) ids.push(b.id); }); } catch(e){}
+    var flags = (await securityFlags(true)).branches || {};
+    var okBranches = {};
+    for(var i=0;i<ids.length;i++){
+      var id = ids[i];
+      var docName = "accounts_"+id;
+      var doc = await fbGet("config", docName);
+      if(!doc && id==="willamette"){ doc = await fbGet("config", "accounts"); docName = "accounts"; }
+      if(!doc){ log(id+": no accounts found, skipped"); continue; }
+      var mgrs = doc.managers||[], techs = doc.techAccounts||[], made = 0, skipped = 0, failed = 0, already = 0;
+      var each = async function(role, a){
+        if(a.secure){ already++; return; }
+        var plain = a.isTemp ? (a.tempPin||a.pin||"") : (a.pin||a.tempPin||"");
+        if(!plain){ skipped++; log("  "+id+": "+(a.name||a.email||"?")+" has no saved PIN - skipped"); return; }
+        if(!a.email){ skipped++; log("  "+id+": "+(a.name||"?")+" has no email - skipped"); return; }
+        try { await secureAccount(role, a, id); made++; }
+        catch(e){ failed++; log("  "+id+": "+(a.name||a.email)+" FAILED: "+e.message); }
+      };
+      for(var m=0;m<mgrs.length;m++) await each("manager", mgrs[m]);
+      for(var t=0;t<techs.length;t++) await each("tech", techs[t]);
+      if(failed===0){
+        await fbSet("config", docName, {managers:mgrs, techAccounts:techs, updatedAt:new Date().toISOString()});
+        okBranches[id] = true;
+        log(id+": "+made+" converted, "+already+" already secure, "+skipped+" skipped");
+      } else {
+        log(id+": "+failed+" failed - nothing saved for this branch (plain PINs left as they were)");
+      }
+    }
+    // the old shared copy (Willamette's original list) must not keep any PINs either
+    try {
+      var legacy = await fbGet("config","accounts");
+      if(legacy && okBranches["willamette"]){
+        var strip = function(arr){ return (arr||[]).map(function(a){ var o = Object.assign({}, a); o.pin = ""; o.tempPin = ""; return o; }); };
+        await fbSet("config","accounts", {managers:strip(legacy.managers), techAccounts:strip(legacy.techAccounts)});
+        log("Older shared account list: PINs erased");
+      }
+    } catch(e){ log("Older shared list: "+e.message); }
+    var newFlags = Object.assign({}, flags, okBranches);
+    await fbSet("config","security", {branches:newFlags, updatedAt:new Date().toISOString()});
+    _secureFlags = null; c.flags = await securityFlags(true);
+    log("Done.");
+  } catch(e){ log("Stopped: "+e.message); }
+  c.running = false; renderSuperAdmin();
 }
 async function saPinChange(){
   if(S.role!=="superadmin") return;
@@ -3845,7 +3921,6 @@ function getNotifEmails(key){
   return cfg.emails||null; // null = use default
 }
 const SUPER_ADMINS = ["john.kluttz@fox-marketingservices.com"];
-const SUPER_ADMIN_PIN = "159753"; // Change this to your preferred PIN
 var _adminPin = "";
 
 // Branch configuration
@@ -3886,6 +3961,100 @@ async function fbSignIn(){
     return false;
   }
 }
+// ─── Secure sign-in: every person has their own Firebase account; PINs are never stored in the database ───
+// The login email + role + branch become a private "alias" address (nobody receives mail there); the PIN, with a fixed
+// suffix to meet Firebase's 6-character minimum, is the account's password. Firebase keeps it hashed and slows down guessing.
+var AUTH_ALIAS_DOMAIN = "login.foxhub.example";
+function authHash(str){ var h = 5381; for(var i=0;i<str.length;i++){ h = (((h<<5)+h) + str.charCodeAt(i))|0; } return (h>>>0).toString(36); }
+function authAlias(role, branch, email, ver){
+  var e = String(email||"").trim().toLowerCase();
+  var tag = role==="manager" ? "m" : role==="superadmin" ? "s" : "t";
+  var clean = e.replace(/[^a-z0-9]/g,"").substring(0,20);
+  return tag+"."+String(branch||"x").replace(/[^a-z0-9]/g,"")+"."+clean+"."+authHash(tag+"|"+branch+"|"+e)+(ver>1?".v"+ver:"")+"@"+AUTH_ALIAS_DOMAIN;
+}
+function authPw(pin){ return String(pin)+"-Fx#hub"; }
+var _secureFlags = null;     // config/security: which branches have been converted
+async function securityFlags(force){
+  if(_secureFlags && !force) return _secureFlags;
+  try { _secureFlags = (await fbGet("config","security")) || {}; } catch(e){ _secureFlags = {}; }
+  return _secureFlags;
+}
+async function branchIsSecure(b){ var f = await securityFlags(); return !!(f.branches && f.branches[b]); }
+// a temporary PIN is shown only in memory, for the welcome email, right after it is created or reset
+function tmpPinOf(a){ return (a && a.tempPin) || (a && S._tmpPins && S._tmpPins[a.id||a.email]) || ""; }
+async function authCreateUser(alias, pw){
+  await initFirebase();
+  var app2 = (firebase.apps||[]).find(function(x){ return x.name==="cred"; });
+  if(!app2) app2 = firebase.initializeApp(firebaseConfigInUse(), "cred");     // a second connection, so the admin stays signed in
+  var a2 = app2.auth();
+  try {
+    var cr = await a2.createUserWithEmailAndPassword(alias, pw);
+    var uid = cr.user.uid;
+    try { await a2.signOut(); } catch(x){}
+    return {ok:true, uid:uid};
+  } catch(e){ return {ok:false, code:e.code||"", message:e.message||String(e)}; }
+}
+// Turns one account's plain PIN (if it has one) into a Firebase sign-in, then erases the PIN from the record.
+async function secureAccount(role, a, branch){
+  var plain = a.isTemp ? (a.tempPin || a.pin || "") : (a.pin || a.tempPin || "");
+  if(!plain) return false;
+  if(!a.email) throw new Error((a.name||"This person")+" has no email address, so a sign-in can't be created");
+  var cu = _auth && _auth.currentUser;
+  if(a.secure && !a.isTemp && a.uid && cu && !cu.isAnonymous && cu.uid===a.uid){
+    await cu.updatePassword(authPw(plain));                       // someone changing their own PIN
+  } else {                                                        // new account, or a manager's reset: a fresh credential
+    var ver = a.secure ? (a.credVer||1)+1 : (a.credVer||1), made = null;
+    for(var tries=0; tries<5 && !made; tries++){
+      var res = await authCreateUser(authAlias(role, branch, a.email, ver), authPw(plain));
+      if(res.ok) made = res;
+      else if(res.code==="auth/email-already-in-use"){ ver++; }
+      else throw new Error((a.name||a.email)+": "+(res.message||res.code));
+    }
+    if(!made) throw new Error("Couldn't create a sign-in for "+(a.name||a.email));
+    await _db.collection("users").doc(made.uid).set({branch:branch, role:role, email:String(a.email).toLowerCase(), name:a.name||"", accountId:a.id||"", credVer:ver, createdAt:new Date().toISOString()});
+    if(a.uid && a.uid!==made.uid){ try { await _db.collection("users").doc(a.uid).delete(); } catch(x){} }   // the old credential loses its access
+    a.uid = made.uid; a.credVer = ver;
+  }
+  S._tmpPins = S._tmpPins || {}; S._tmpPins[a.id||a.email] = plain;
+  a.secure = true; a.pin = ""; a.tempPin = "";
+  return true;
+}
+// An account that fails is still stripped of its PIN (so nothing readable is saved) and marked for a reset.
+async function secureAccounts(mgrs, techs, branch){
+  var errs = [];
+  var one = async function(role, a){
+    try { await secureAccount(role, a, branch); }
+    catch(e){ errs.push(e.message); a.pin = ""; a.tempPin = ""; a.needsReset = true; }
+  };
+  for(var i=0;i<(mgrs||[]).length;i++) await one("manager", mgrs[i]);
+  for(var j=0;j<(techs||[]).length;j++) await one("tech", techs[j]);
+  return errs;
+}
+async function secureSignIn(role, user, pin){
+  await initFirebase();
+  try {
+    var cr = await _auth.signInWithEmailAndPassword(authAlias(role, S.branch, user.email, user.credVer||1), authPw(pin));
+    return {ok:true, uid:cr.user.uid};
+  } catch(e){
+    var c = e.code||"";
+    if(c==="auth/too-many-requests") return {ok:false, reason:"throttled"};
+    if(c==="auth/network-request-failed") return {ok:false, reason:"offline"};
+    return {ok:false, reason:"wrong"};
+  }
+}
+var _pinBusy = false;
+async function securePinAttempt(user){
+  if(_pinBusy) return;
+  _pinBusy = true;
+  var attempt = pin, err = document.getElementById("pin-err");
+  var role = loginRole || (S.managers.find(function(m){ return m.id===user.id; }) ? "manager" : "tech");
+  var r = await secureSignIn(role, user, attempt);
+  _pinBusy = false;
+  if(r.ok){ if(user.isTemp) doLogin(role, true); else login(role); return; }
+  if(err) err.textContent = r.reason==="throttled" ? "Too many tries - wait a few minutes and try again" : r.reason==="offline" ? "Can't check the PIN - check your connection" : "Incorrect PIN";
+  pin = ""; dots();
+}
+
 function initFirebase(){
   if(_fbReady) return Promise.resolve();
   if(_fbInitPromise) return _fbInitPromise;
@@ -4311,6 +4480,12 @@ async function gs(fn, data){
         var trucksToSave = pickList("trucks");
         var catsToSave = pickList("cats");
         var inspFieldsToSave = pickList("inspFields");
+        // In a converted branch no PIN is ever written to the database: new or reset PINs become sign-ins first
+        var secureWarn = "";
+        if(await branchIsSecure(brKeySave)){
+          var secErrs = await secureAccounts(managersToSave, techsToSave, brKeySave);
+          if(secErrs.length){ secureWarn = secErrs.join("; "); try { showToast("Some sign-ins could not be created: "+secureWarn); } catch(x){} }
+        }
         // Safety: never save if branch doesn't match current session
         console.log("saveAccounts: branch="+brKeySave+" managers="+managersToSave.length+" techs="+techsToSave.length);
         await fbSet("config","accounts_"+brKeySave,{
@@ -4326,7 +4501,7 @@ async function gs(fn, data){
         lsSet("hub:trucks", data.trucks||[]);
         lsSet("hub:cats", data.cats||[]);
         lsSet("hub:inspFields", data.inspFields||[]);
-        return {ok:true};
+        return secureWarn ? {ok:true, warning:secureWarn} : {ok:true};
       }
 
       // ── PRODUCTS ────────────────────────────────────────────────────────────
@@ -5570,6 +5745,7 @@ async function checkEmail(){
 }
 
 function pinTap(k){
+  if(_pinBusy) return;
   const err=document.getElementById("pin-err");
   if(k==="del"){pin=pin.slice(0,-1);dots();if(err)err.textContent="";return;}
   if(pin.length>=6)return;
@@ -5577,6 +5753,7 @@ function pinTap(k){
   if(pin.length>=4){
     if(!S.currentUser){ if(err) err.textContent="Please enter your email first."; pin=""; dots(); return; }
     var user = S.currentUser;
+    if(user.secure){ securePinAttempt(user); return; }       // converted account: Firebase checks the PIN
     var correctPin = user.isTemp ? user.tempPin : user.pin;
     if(pin === correctPin){
       var role = loginRole || (S.managers.find(function(m){ return m.id===user.id; }) ? "manager" : "tech");
@@ -5625,12 +5802,27 @@ function showSetPin(){
   if(logo) logo.style.cssText = "height:80px;width:200px;margin-bottom:32px;background-image:url(\""+LOGO_SRC+"\");background-size:contain;background-repeat:no-repeat;background-position:center;";
   // Attach button handler
   var btn = document.getElementById("set-pin-btn");
-  if(btn) btn.onclick = function(){
+  if(btn) btn.onclick = async function(){
     var p1 = document.getElementById("new-pin-1").value.replace(/[^0-9]/g,"");
     var p2 = document.getElementById("new-pin-2").value.replace(/[^0-9]/g,"");
     var errDiv = document.getElementById("set-pin-err");
     if(p1.length !== 4){ errDiv.textContent="Your PIN must be exactly 4 digits."; return; }
     if(p1 !== p2){ errDiv.textContent="PINs do not match."; return; }
+    if(S.currentUser.secure){
+      try {
+        var cu = _auth && _auth.currentUser;
+        if(!cu || cu.isAnonymous) throw new Error("Please go back and sign in again.");
+        await cu.updatePassword(authPw(p1));
+      } catch(e){ errDiv.textContent = "Couldn't save the PIN: "+(e.code==="auth/requires-recent-login" ? "please go back and sign in again." : e.message); return; }
+      S.currentUser.isTemp = false; S.currentUser.tempPin = ""; S.currentUser.pin = "";
+      if(S.role==="manager"){ S.managers = S.managers.map(function(m){ return m.id===S.currentUser.id ? S.currentUser : m; }); }
+      else { S.techAccounts = S.techAccounts.map(function(t){ return t.id===S.currentUser.id ? S.currentUser : t; }); }
+      S.managerName = S.currentUser.name;
+      save();
+      try { await saveAccountsToSheet(); } catch(e){}
+      login(S.role);
+      return;
+    }
     // Save PIN
     S.currentUser.pin = p1;
     S.currentUser.isTemp = false;
@@ -5740,7 +5932,16 @@ async function adminPinSubmit(){
     render();
     return;
   }
-  if(res.reason==="offline") say("Can't check the PIN right now - check your connection");
+  if(res.reason==="nopin"){
+    // Nothing is saved yet (a brand-new or test database): the first 6-digit PIN typed here becomes the Super Admin PIN.
+    if(_adminPin.length===6 && !saPinProblem(_adminPin, "") && confirm("No Super Admin PIN is set on this database yet.\n\nUse these 6 digits as the Super Admin PIN?")){
+      var nsalt = saNewSalt(), nhash = await saPbkdf2(_adminPin, nsalt);
+      await fbSet("config", "superAdmin", {hash:nhash, salt:nsalt, algo:"pbkdf2-sha256-150000", changedAt:new Date().toISOString()});
+      say("PIN saved - enter it again to sign in"); _adminPin = ""; updateAdminDots(); return;
+    }
+    say("No Super Admin PIN is set yet. Pick a 6-digit PIN (not 123456 or the same digit) and enter it.");
+  }
+  else if(res.reason==="offline") say("Can't check the PIN right now - check your connection");
   else say(saRegisterFail() ? "Too many wrong tries - wait 60 seconds" : "Incorrect PIN - try again");
   _adminPin = "";
   updateAdminDots();
@@ -5772,6 +5973,7 @@ async function loadBranchList(){
 }
 
 function logout(){
+  try { if(_auth && _auth.currentUser && !_auth.currentUser.isAnonymous){ _auth.signOut().then(function(){ return fbSignIn(); }).catch(function(){}); } } catch(e){}
   S._est = null; S._estView = "list";
   S.role=null; S.currentUser=null; S.checkTech=""; pin=""; loginEmail=""; loginRole="";
   S.branch=null; S.branchName=null; S.branchChosen=false; S._saViewBranch=null;
@@ -6228,7 +6430,7 @@ async function handleAction(a,v,el,e){
     if(!wMgr){ showToast("Manager not found"); return; }
     if(!confirm("Send a welcome email to "+wMgr.name+" ("+wMgr.email+")?\n\nIt includes their temporary PIN.")) return;
     var wRes = await saSendWelcome(wMgr, (S._saViewBranch && S._saViewBranch.name) || wParts[0]);
-    showToast(wRes.ok ? "Welcome email sent ✓" : (wRes.error==="already" ? "They have already set their own PIN" : "Email didn't send: "+wRes.error));
+    showToast(wRes.ok ? "Welcome email sent ✓" : (wRes.error==="already" ? "They have already set their own PIN" : wRes.error==="nopin" ? "Their temporary PIN can't be shown again - use Reset PIN, then send the welcome" : "Email didn't send: "+wRes.error));
     return;
   }
   if(a==="sa-main-admin"){
@@ -6298,6 +6500,8 @@ async function handleAction(a,v,el,e){
   }
   if(a==="sa-terms-open"){ await saTermsOpen(); return; }
   if(a==="sa-pin-open"){ await saPinOpen(); return; }
+  if(a==="sa-secure-open"){ await saSecureOpen(); return; }
+  if(a==="sa-secure-run"){ await saSecureRun(); return; }
   if(a==="sa-backups-open"){ await saBackupsOpen(); return; }
   if(a==="sa-estimate-cleanup"){ await estCleanupOpen(); return; }
   if(a==="sa-check-bridge"){
@@ -7076,7 +7280,7 @@ async function handleAction(a,v,el,e){
     var tp=prompt("New temporary PIN (4 digits):","1234");
     if(tp&&tp.length===4&&!isNaN(tp)){
       S.techAccounts[parseInt(v)].pin=""; S.techAccounts[parseInt(v)].tempPin=tp; S.techAccounts[parseInt(v)].isTemp=true;
-      save(); alert("PIN reset. Tech will be prompted to set a new PIN on next login.");
+      save(); await saveAccountsToSheet(); alert("PIN reset. Tech will be prompted to set a new PIN on next login.");
     }
     return;
   }
@@ -7128,7 +7332,7 @@ async function handleAction(a,v,el,e){
     var mp=prompt("New temporary PIN (4 digits):","1234");
     if(mp&&mp.length===4&&!isNaN(mp)){
       S.managers[parseInt(v)].pin=""; S.managers[parseInt(v)].tempPin=mp; S.managers[parseInt(v)].isTemp=true;
-      save(); alert("PIN reset.");
+      save(); await saveAccountsToSheet(); alert("PIN reset.");
     }
     return;
   }
@@ -10137,6 +10341,7 @@ function renderSuperAdmin(){
   if(S._saTool==="estimates" && S._cln){ estClnBind(pg); estCleanupRender(); return; }   // the estimate clean-up tool
   if(S._saTool==="terms"){ estTermsBind(pg); renderEstTerms(pg); return; }
   if(S._saTool==="pin"){ renderSaPin(pg); return; }
+  if(S._saTool==="secure"){ renderSaSecure(pg); return; }
   if(S._saTool==="backups"){ bkBind(pg); renderBackups(pg); return; }
 
   // If viewing a branch's settings, show that
@@ -10166,6 +10371,7 @@ function renderSuperAdmin(){
     +"<div style='font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;'>Company Settings &amp; Safety</div>"
     +"<button class='btn bg' data-a='sa-terms-open' style='width:100%;padding:12px;margin-bottom:8px;'>🧾 Estimate wording &amp; options</button>"
     +"<button class='btn bg' data-a='sa-pin-open' style='width:100%;padding:12px;margin-bottom:8px;'>🔑 Change Super Admin PIN</button>"
+    +"<button class='btn bg' data-a='sa-secure-open' style='width:100%;padding:12px;margin-bottom:8px;'>🔐 Secure sign-in for all accounts</button>"
     +"<button class='btn bg' data-a='sa-backups-open' style='width:100%;padding:12px;margin-bottom:4px;'>💾 Backups &amp; restore</button>"
     +"<div id='bk-status' style='font-size:11px;color:#64748b;text-align:center;margin-bottom:6px;'></div>"
     +"</div>"
@@ -14211,7 +14417,7 @@ async function sendLoginEmail(role, idx){
   const acct = role==="manager" ? S.managers[idx] : S.techAccounts[idx];
   if(!acct){ alert("Account not found."); return; }
   if(!acct.email){ alert("No email address set for "+acct.name+". Please add an email first."); return; }
-  const tempPin = acct.isTemp ? acct.tempPin : "";
+  const tempPin = acct.isTemp ? tmpPinOf(acct) : "";
   if(!tempPin){ 
     const reset = confirm(acct.name+" has already set their PIN. Would you like to reset it first so you can send them a new temp PIN?");
     if(!reset) return;
@@ -14219,9 +14425,9 @@ async function sendLoginEmail(role, idx){
     if(!newPin||newPin.length<4){ alert("PIN must be at least 4 digits."); return; }
     acct.pin=""; acct.tempPin=newPin; acct.isTemp=true;
     if(role==="manager") S.managers[idx]=acct; else S.techAccounts[idx]=acct;
-    save(); saveAccountsToSheet();
+    save(); await saveAccountsToSheet();
   }
-  const pin = acct.isTemp ? acct.tempPin : tempPin;
+  const pin = acct.isTemp ? (tmpPinOf(acct) || acct.tempPin) : tempPin;
   const appUrl = window.location.href.split("?")[0];
   const subject = "Fox Pest Control Admin Hub - Your Login Information";
   const body = "Hello "+acct.name+",\n\n"
