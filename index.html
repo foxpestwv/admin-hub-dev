@@ -50,19 +50,16 @@ input,textarea,select,button{font-family:inherit;}
 .bdg{background:#ef4444;color:#fff;border-radius:50%;width:15px;height:15px;font-size:10px;display:inline-flex;align-items:center;justify-content:center;margin-left:2px;}
 #wrap{max-width:760px;margin:0 auto;padding:20px 14px;}
 .pg{display:none;} .pg.on{display:block;}
-/* Home Screen honeycomb: a compact comb - rows alternate 2 and 3 hexagons, centred, nested together */
+/* Home Screen honeycomb: tiles build outward in a circle - one in the middle, then a ring of six, then a ring of twelve */
 .hive{container-type:inline-size;max-width:420px;margin:0 auto;padding-bottom:6px;}
-.hive-row{display:flex;margin-top:calc(-9.62% + 4px);}
-.hive-row:first-child{margin-top:0;}
-.hive-row.s2 .hexw:first-child{margin-left:calc(100% / 6 + 2px);}
-.hive-row.one .hexw:first-child{margin-left:calc(100% / 3 + 2px);}
-.hexw{position:relative;width:calc(100% / 3 - 4px);margin:0 2px;aspect-ratio:0.866;pointer-events:none;flex:none;}
+.comb{position:relative;width:100%;height:0;}
+.hexw{position:absolute;aspect-ratio:0.866;pointer-events:none;}
 .hex,.hexin{clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);}
-.hex{position:absolute;inset:0;pointer-events:auto;cursor:pointer;touch-action:manipulation;transition:transform .12s,filter .12s;-webkit-tap-highlight-color:transparent;}
+.hex{position:absolute;inset:2px;pointer-events:auto;cursor:pointer;touch-action:manipulation;transition:transform .12s,filter .12s;-webkit-tap-highlight-color:transparent;}
 .hex:active{transform:scale(.94);filter:brightness(1.25);}
 .hexin{position:absolute;inset:2px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:0 10%;text-align:center;}
-.hexin .hi{font-size:clamp(20px,8.5cqw,34px);line-height:1;}
-.hexin .hl{font-size:clamp(9.5px,2.9cqw,13px);font-weight:600;color:#e2e8f0;line-height:1.15;}
+.hexin .hi{font-size:clamp(18px,calc(var(--hw,33.3)*.255cqw),34px);line-height:1;}
+.hexin .hl{font-size:clamp(9px,calc(var(--hw,33.3)*.087cqw),13px);font-weight:600;color:#e2e8f0;line-height:1.15;}
 .hexb{position:absolute;top:9%;right:17%;min-width:20px;height:20px;padding:0 4px;box-sizing:border-box;background:#ef4444;color:#fff;border-radius:10px;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;pointer-events:none;border:2px solid #0a1628;}
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
 .g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
@@ -469,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.14.0";
+const APP_VERSION = "6.14.1";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -7584,14 +7581,33 @@ function renderDash(){
     return "<div class='hexw'><div class='hex' "+tileAction+" title='"+esc(t.label)+"' style='background:"+t.accent+"88;'>"
       +"<div class='hexin' style='background:"+t.color+";'><div class='hi'>"+t.icon+"</div><div class='hl'>"+esc(t.label)+"</div></div></div>"+badgeHtml+"</div>";
   };
-  var tilesHtml = "";
-  // rows alternate 2 and 3 hexagons; start with 2 unless that would leave a lone pair in a row of 3 (a pair cannot be centred in it)
-  var hiveRows = function(first){ var out = [], n = 0, slot = first; while(n<tiles.length){ var k = Math.min(slot, tiles.length-n); out.push({slot:slot, tiles:tiles.slice(n, n+k)}); n += k; slot = slot===2 ? 3 : 2; } return out; };
-  var plan = hiveRows(2), lastRow = plan[plan.length-1];
-  if(lastRow.slot===3 && lastRow.tiles.length===2) plan = hiveRows(3);
-  plan.forEach(function(row){
-    tilesHtml += "<div class='hive-row"+(row.slot===2 ? " s2" : "")+(row.tiles.length===1 ? " one" : "")+"'>"+row.tiles.map(hexHtml).join("")+"</div>";
-  });
+  var tilesHtml = "", hiveMax = 420;
+  // tiles build outward in a circle: the first goes in the middle, then a ring of 6, then a ring of 12 - each ring starts on the left and runs clockwise
+  var hiveCells = function(n){
+    var cells = [{q:0,r:0}], k = 1;
+    while(cells.length<n){
+      var ring = [], dirs = [[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]], q = -k, r = k;
+      for(var i=0;i<6;i++){ for(var j=0;j<k;j++){ ring.push({q:q,r:r}); q += dirs[i][0]; r += dirs[i][1]; } }
+      ring.forEach(function(c){ c.a = ((Math.atan2(0.866*c.r, c.q+c.r/2) - Math.PI + 1e-9) % (2*Math.PI) + 2*Math.PI) % (2*Math.PI); });
+      ring.sort(function(x,y){ return x.a-y.a; });
+      cells = cells.concat(ring); k++;
+    }
+    return cells.slice(0,n);
+  };
+  if(tiles.length){
+    var cells = hiveCells(tiles.length), HH = 1.1547;
+    cells.forEach(function(c){ c.x = c.q + c.r/2; c.y = 0.866*c.r; });
+    var x0 = Math.min.apply(null, cells.map(function(c){return c.x;}))-0.5, x1 = Math.max.apply(null, cells.map(function(c){return c.x;}))+0.5;
+    var y0 = Math.min.apply(null, cells.map(function(c){return c.y;}))-HH/2, y1 = Math.max.apply(null, cells.map(function(c){return c.y;}))+HH/2;
+    var tw = x1-x0, th = y1-y0;
+    hiveMax = Math.round(Math.min(560, Math.max(300, 140*tw)));
+    tilesHtml = "<div class='comb' style='--hw:"+(100/tw).toFixed(2)+";padding-bottom:"+(th/tw*100).toFixed(2)+"%;'>"
+      + tiles.map(function(t,i){
+          var c = cells[i];
+          return hexHtml(t).replace("<div class='hexw'>","<div class='hexw' style='left:"+((c.x-0.5-x0)/tw*100).toFixed(3)+"%;top:"+((c.y-HH/2-y0)/th*100).toFixed(3)+"%;width:"+(100/tw).toFixed(3)+"%;'>");
+        }).join("")
+      + "</div>";
+  }
   if(!tiles.length){
     tilesHtml = "<div style='text-align:center;color:#64748b;padding:30px 10px;font-size:14px;'>Nothing is available on your home screen yet.<br>Ask your manager if you need access to something.</div>";
   }
@@ -7624,7 +7640,7 @@ function renderDash(){
       :"")
 
     // Home Screen honeycomb
-    +"<div class='hive'>"+tilesHtml+"</div>";
+    +"<div class='hive' style='max-width:"+hiveMax+"px'>"+tilesHtml+"</div>";
 }
 
 
