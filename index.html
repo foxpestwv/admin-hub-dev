@@ -469,7 +469,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.13.2";
+const APP_VERSION = "6.14.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -636,7 +636,7 @@ function estTotals(e){
 }
 function estNewDraft(){
   var u = estUser(), st = estSettings();
-  return {id:"est_"+Date.now(), number:null, branch:S.branch||"willamette", status:"Draft",
+  return {id:"est_"+Date.now()+"_"+randHex(6), number:null, branch:S.branch||"willamette", status:"Draft",
     createdAt:new Date().toISOString(), date:new Date().toISOString(),
     createdBy:u.name, createdByEmail:u.email, employeePhone:(lsGet("hub:estPhone")||""),
     customer:{name:"", street:"", city:"", state:"OR", zip:"", phone:"", email:""},
@@ -2733,6 +2733,7 @@ async function saPinChange(){
   _adminFails = 0;
   var salt = saNewSalt(), hash = await saPbkdf2(np, salt);
   await fbSet("config", "superAdmin", {hash:hash, salt:salt, algo:"pbkdf2-sha256-150000", changedAt:new Date().toISOString()});
+  try { var cuS = _auth && _auth.currentUser; if(cuS && !cuS.isAnonymous) await cuS.updatePassword(authPw(np)); } catch(eP){ console.warn("Super Admin sign-in password:", eP.message); }
   showToast("Super Admin PIN changed ✓");
   S._pin = {loaded:true, custom:true, changedAt:new Date().toISOString()};
   renderSuperAdmin();
@@ -4011,7 +4012,7 @@ async function secureAccount(role, a, branch){
       else throw new Error((a.name||a.email)+": "+(res.message||res.code));
     }
     if(!made) throw new Error("Couldn't create a sign-in for "+(a.name||a.email));
-    await _db.collection("users").doc(made.uid).set({branch:branch, role:role, email:String(a.email).toLowerCase(), name:a.name||"", accountId:a.id||"", credVer:ver, createdAt:new Date().toISOString()});
+    await _db.collection("users").doc(made.uid).set({branch:branch, role:role, email:String(a.email).toLowerCase(), name:a.name||"", accountId:a.id||"", credVer:ver, temp:!!a.isTemp, createdAt:new Date().toISOString()});
     if(a.uid && a.uid!==made.uid){ try { await _db.collection("users").doc(a.uid).delete(); } catch(x){} }   // the old credential loses its access
     a.uid = made.uid; a.credVer = ver;
   }
@@ -4042,6 +4043,38 @@ async function secureSignIn(role, user, pin){
     return {ok:false, reason:"wrong"};
   }
 }
+function randHex(n){ var a = new Uint8Array(n), r = ""; (window.crypto||window.msCrypto).getRandomValues(a); for(var i=0;i<n;i++) r += ("0"+a[i].toString(16)).slice(-2); return r; }
+function newSigId(){ return "SIG-"+Date.now()+"-"+randHex(6); }       // the random part makes the link-less address impossible to guess
+
+// Super Admin: a real Firebase sign-in (so the database rules know who you are). The saved-PIN check is only used to create or refresh it.
+async function superLogin(pin){
+  await initFirebase();
+  var fl = await securityFlags(true), ver = fl.superVer||1, email = SUPER_ADMINS[0];
+  try {
+    var cr0 = await _auth.signInWithEmailAndPassword(authAlias("superadmin","all",email,ver), authPw(pin));
+    return {ok:true, uid:cr0.user.uid};
+  } catch(e0){
+    if(e0.code==="auth/too-many-requests") return {ok:false, reason:"throttled"};
+    if(e0.code==="auth/network-request-failed") return {ok:false, reason:"offline"};
+  }
+  var hv; try { hv = await saVerifyPin(pin); } catch(x){ hv = {ok:false, reason:"offline"}; }
+  if(!hv.ok) return hv.reason ? hv : {ok:false, reason:"wrong"};
+  for(var v=ver; v<=ver+8; v++){
+    var alias = authAlias("superadmin","all",email,v), made = await authCreateUser(alias, authPw(pin));
+    if(made.ok){
+      await _auth.signInWithEmailAndPassword(alias, authPw(pin));
+      await _db.collection("users").doc(made.uid).set({branch:"all", role:"superadmin", email:email, name:"Super Admin", credVer:v, temp:false, createdAt:new Date().toISOString()});
+      await fbSet("config","security",{superVer:v}); _secureFlags = null;
+      return {ok:true, uid:made.uid};
+    }
+    if(made.code==="auth/email-already-in-use"){
+      try { var c2 = await _auth.signInWithEmailAndPassword(alias, authPw(pin)); if(v!==ver){ await fbSet("config","security",{superVer:v}); _secureFlags = null; } return {ok:true, uid:c2.user.uid}; }
+      catch(e2){ continue; }
+    }
+    return {ok:false, reason:"error", message:made.message};
+  }
+  return {ok:false, reason:"error"};
+}
 var _pinBusy = false;
 async function securePinAttempt(user){
   if(_pinBusy) return;
@@ -4050,7 +4083,13 @@ async function securePinAttempt(user){
   var role = loginRole || (S.managers.find(function(m){ return m.id===user.id; }) ? "manager" : "tech");
   var r = await secureSignIn(role, user, attempt);
   _pinBusy = false;
-  if(r.ok){ if(user.isTemp) doLogin(role, true); else login(role); return; }
+  if(r.ok){
+    var temp = !!user.isTemp;                                   // the sign-in record says whether this is still a temporary PIN
+    try { var ps = await _db.collection("users").doc(r.uid).get(); if(ps.exists && ps.data().temp!==undefined) temp = !!ps.data().temp; } catch(x){}
+    user.isTemp = temp;
+    if(temp) doLogin(role, true); else login(role);
+    return;
+  }
   if(err) err.textContent = r.reason==="throttled" ? "Too many tries - wait a few minutes and try again" : r.reason==="offline" ? "Can't check the PIN - check your connection" : "Incorrect PIN";
   pin = ""; dots();
 }
@@ -5813,13 +5852,14 @@ function showSetPin(){
         var cu = _auth && _auth.currentUser;
         if(!cu || cu.isAnonymous) throw new Error("Please go back and sign in again.");
         await cu.updatePassword(authPw(p1));
+        try { await _db.collection("users").doc(cu.uid).update({temp:false}); } catch(x){}
       } catch(e){ errDiv.textContent = "Couldn't save the PIN: "+(e.code==="auth/requires-recent-login" ? "please go back and sign in again." : e.message); return; }
       S.currentUser.isTemp = false; S.currentUser.tempPin = ""; S.currentUser.pin = "";
       if(S.role==="manager"){ S.managers = S.managers.map(function(m){ return m.id===S.currentUser.id ? S.currentUser : m; }); }
       else { S.techAccounts = S.techAccounts.map(function(t){ return t.id===S.currentUser.id ? S.currentUser : t; }); }
       S.managerName = S.currentUser.name;
       save();
-      try { await saveAccountsToSheet(); } catch(e){}
+      if(S.role==="manager"){ try { await saveAccountsToSheet(); } catch(e){} }   // technicians cannot edit the account list
       login(S.role);
       return;
     }
@@ -5913,7 +5953,7 @@ async function adminPinSubmit(){
   if(wait){ say("Too many wrong tries - wait "+wait+" seconds"); _adminPin = ""; updateAdminDots(); return; }
   _adminBusy = true; say("Checking...");
   var res;
-  try { res = await saVerifyPin(_adminPin); } catch(err){ res = {ok:false, reason:"offline"}; }
+  try { res = await superLogin(_adminPin); } catch(err){ res = {ok:false, reason:"offline"}; }
   _adminBusy = false;
   if(res.ok){
     _adminFails = 0;
@@ -5943,6 +5983,8 @@ async function adminPinSubmit(){
     say("No Super Admin PIN is set yet. Pick a 6-digit PIN (not 123456 or the same digit) and enter it.");
   }
   else if(res.reason==="offline") say("Can't check the PIN right now - check your connection");
+  else if(res.reason==="throttled") say("Too many tries - wait a few minutes and try again");
+  else if(res.reason==="error") say("Couldn't create the Super Admin sign-in"+(res.message?": "+res.message:""));
   else say(saRegisterFail() ? "Too many wrong tries - wait 60 seconds" : "Incorrect PIN - try again");
   _adminPin = "";
   updateAdminDots();
@@ -13202,7 +13244,7 @@ async function pdfSendDocument(){
 
   try {
     var result = await gs("uploadMultiSignRequestServer", {
-      id: "SIG-"+Date.now(),
+      id: newSigId(),
       date: new Date().toISOString(),
       docName: docName, note: note,
       createdBy: S.managerName,
@@ -13718,7 +13760,7 @@ async function signLoadFile(){
   reader.onload = function(e){
     var b64 = e.target.result.split(",")[1];
     var req = {
-      id: "SIG-"+Date.now(),
+      id: newSigId(),
       date: new Date().toISOString(),
       techName: tech.name,
       techEmail: tech.email||"",
@@ -14221,7 +14263,7 @@ async function submitQAForm(){
     var fileName = d.tech+" QA - "+d.date+".pdf";
     var tech = S.techAccounts.find(function(t){ return t.name===d.tech; });
     S._pendingSignReq = {
-      id: "SIG-"+Date.now(),
+      id: newSigId(),
       date: new Date().toISOString(),
       techName: d.tech,
       techEmail: tech?tech.email:"",
@@ -14343,7 +14385,7 @@ async function submitRAForm(){
     var fileName = d.tech+" RA - "+d.date+".pdf";
     var tech = S.techAccounts.find(function(t){ return t.name===d.tech; });
     S._pendingSignReq = {
-      id: "SIG-"+Date.now(),
+      id: newSigId(),
       date: new Date().toISOString(),
       techName: d.tech,
       techEmail: tech?tech.email:"",
