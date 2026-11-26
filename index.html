@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.14.1";
+const APP_VERSION = "6.14.4";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -5803,6 +5803,7 @@ function pinTap(k){
 }
 
 function doLogin(role, isTemp){
+  setTimeout(function(){ checkForUpdates(true); }, 1500);   // signed in by now, so a newer version can be registered for everyone else's yellow banner
   if(isTemp){
     // Show set PIN screen
     S.role=role;
@@ -6141,6 +6142,7 @@ document.addEventListener("input",function(e){
   if(t.id==="insp-inspector") S.inspData.inspector=t.value;
   if(t.id==="insp-notes") S.inspData.notes=t.value;
   if(t.dataset.commentkey) S.inspData.comments[t.dataset.commentkey]=t.value;
+  if(t.dataset.checkkey){ if(t.checked) S.inspData.comments[t.dataset.checkkey]="Done"; else delete S.inspData.comments[t.dataset.checkkey]; }
   if(t.id==="new-truck-inp"||t.id==="new-tech-inp") {}
 });
 
@@ -7716,6 +7718,8 @@ function inspForm(){
       var btns="";
       if(inputType==="score"){
         btns=Array.from({length:cat.scale},(_,i)=>i+1).map(n=>`<button class="skb${val===n?" on":""}" style="${val===n?"background:"+sc((n/cat.scale)*100)+";border-color:"+sc((n/cat.scale)*100)+";":""}" data-a="score" data-v="${cat.id}|${item.id}|${n}">${n}</button>`).join("");
+      } else if(inputType==="check"){
+        btns=`<label style="display:flex;align-items:center;gap:10px;font-size:15px;cursor:pointer;padding:4px 0;"><input type="checkbox" data-checkkey="${key}" ${inspData.comments[key]==="Done"?"checked":""} style="width:24px;height:24px;accent-color:#22c55e;"> Completed</label>`;
       } else if(inputType==="text"){
         btns=`<input type="text" class="inp" style="font-size:13px;padding:7px 10px;" placeholder="Enter text..." value="${esc(inspData.comments[key]||"")}" data-commentkey="${key}">`;
       } else if(inputType==="textarea"){
@@ -7768,11 +7772,11 @@ function inspDetail(){
   const r=S.detailInsp;
   if(!r) return "";
   const cats=S.cats.map(cat=>{
-    const scored=cat.items.filter(i=>r.scores[cat.id+":"+i.id]!==undefined);
+    const scored=cat.items.filter(i=>r.scores[cat.id+":"+i.id]!==undefined||(r.comments&&r.comments[cat.id+":"+i.id]));
     if(!scored.length) return "";
     const e=scored.reduce((a,i)=>a+(r.scores[cat.id+":"+i.id]||0),0);
-    const cp=Math.round((e/(cat.items.length*cat.scale))*100);
-    return `<div class="card" style="margin-bottom:10px;padding:0;overflow:hidden;"><div style="padding:10px 14px;background:#0a1628;display:flex;justify-content:space-between;"><span style="font-weight:600;font-size:14px;">${esc(cat.label)}</span><span style="font-family:monospace;font-size:13px;font-weight:700;color:${sc(cp)}">${cp}%</span></div><div style="padding:14px;">${cat.items.map(item=>{const s=r.scores[cat.id+":"+item.id];const cm=r.comments?.[cat.id+":"+item.id];return `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;"><div><div style="font-size:13px;">${esc(item.label)}</div>${cm?`<div style="font-size:11px;color:#64748b;">"${esc(cm)}"</div>`:""}</div><span style="font-family:monospace;font-size:13px;font-weight:700;white-space:nowrap;color:${s===undefined?"#334155":sc((s/cat.scale)*100)}">${s===undefined?"--":s+"/"+cat.scale}</span></div>`;}).join("")}</div></div>`;
+    const cp=Math.round((e/(Math.max(1,cat.items.filter(i=>(i.inputType||"score")==="score").length)*cat.scale))*100);
+    return `<div class="card" style="margin-bottom:10px;padding:0;overflow:hidden;"><div style="padding:10px 14px;background:#0a1628;display:flex;justify-content:space-between;"><span style="font-weight:600;font-size:14px;">${esc(cat.label)}</span><span style="font-family:monospace;font-size:13px;font-weight:700;color:${sc(cp)}">${cp}%</span></div><div style="padding:14px;">${cat.items.map(item=>{const s=r.scores[cat.id+":"+item.id];const cm=r.comments?.[cat.id+":"+item.id];const it=item.inputType||"score";if(it==="none")return "";if(it!=="score"){const shown=it==="check"?(cm==="Done"?"\u2713 Done":"Not done"):it==="number"?(s===undefined?"--":s):(cm||"--");return `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;"><div style="font-size:13px;">${esc(item.label)}</div><span style="font-size:13px;font-weight:600;color:${it==="check"&&cm!=="Done"?"#64748b":"#e2e8f0"};text-align:right;">${esc(String(shown))}</span></div>`;}return `<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;"><div><div style="font-size:13px;">${esc(item.label)}</div>${cm?`<div style="font-size:11px;color:#64748b;">"${esc(cm)}"</div>`:""}</div><span style="font-family:monospace;font-size:13px;font-weight:700;white-space:nowrap;color:${s===undefined?"#334155":sc((s/cat.scale)*100)}">${s===undefined?"--":s+"/"+cat.scale}</span></div>`;}).join("")}</div></div>`;
   }).join("");
   const photos=r.photos?.length?`<div class="card" style="margin-top:8px;"><div style="font-size:11px;color:#475569;text-transform:uppercase;margin-bottom:10px;">Photos (${r.photos.length})</div><div class="g3">${r.photos.map(ph=>`<img src="${ph.data}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:7px;">`).join("")}</div></div>`:"";
   return `<div style="display:flex;gap:10px;align-items:center;margin-bottom:16px;"><button class="btn bg" data-a="insp-view" data-v="list">Back</button><button class="btn bd" data-a="insp-del" data-v="${r.id}">Delete</button></div>
@@ -7781,9 +7785,31 @@ function inspDetail(){
     ${cats}${photos}`;
 }
 
+// ── Inspection scoring summary shown in Settings ──
+function inspScoredItems(c){ return (c.items||[]).filter(function(it){ return (it.inputType||"score")==="score"; }); }
+function inspTallyData(){
+  var tot = 0;
+  var rows = (S.cats||[]).map(function(c){ var n = inspScoredItems(c).length, pts = n*(parseInt(c.scale)||10); tot += pts; return {n:n, each:(parseInt(c.scale)||10), pts:pts}; });
+  return {rows:rows, tot:tot};
+}
+function inspCatSumHtml(r, tot){
+  var pct = tot>0 ? Math.round(r.pts/tot*100) : 0;
+  return r.n+" scored item"+(r.n===1?"":"s")+" x "+r.each+" point"+(r.each===1?"":"s")+" each = <b style='color:#e2e8f0;'>"+r.pts+" points</b> <span style='color:#64748b;'>("+pct+"% of the inspection)</span>";
+}
+function inspTallyHtml(d){
+  return "<div style='font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;'>Total possible score</div>"
+    +"<div style='font-size:24px;font-weight:700;color:#22c55e;margin:2px 0 6px;'>"+d.tot+" points</div>"
+    +"<div style='font-size:12px;color:#94a3b8;line-height:1.5;'>The number in each category's box is how many points <b>each scored item</b> in it is worth. A truck's score is the points earned out of this total, so a category with more items or a bigger number counts for more.</div>";
+}
+function inspTallyRefresh(){
+  var d = inspTallyData();
+  d.rows.forEach(function(r,i){ var el = document.getElementById("cat-sum-"+i); if(el) el.innerHTML = inspCatSumHtml(r, d.tot); });
+  var t = document.getElementById("insp-tally"); if(t) t.innerHTML = inspTallyHtml(d);
+}
+
 function calcPct(){
   let e=0,p=0;
-  S.cats.forEach(c=>c.items.forEach(item=>{p+=c.scale;const s=S.inspData.scores[c.id+":"+item.id];if(s!==undefined)e+=s;}));
+  S.cats.forEach(c=>c.items.filter(i=>(i.inputType||"score")==="score").forEach(item=>{p+=c.scale;const s=S.inspData.scores[c.id+":"+item.id];if(s!==undefined)e+=s;}));
   return p>0?Math.round((e/p)*100):0;
 }
 
@@ -7864,7 +7890,7 @@ function buildInspectionPdfData(rec){
     +"<div style='font-size:11px;color:#666;'>Inspector: "+esc(rec.inspector||"")+"</div>"
     +(rec.mileage?"<div style='font-size:11px;color:#666;'>Mileage: "+esc(rec.mileage)+"</div>":"")
     +"</div></div>"
-    +"<div class='overall'><div class='overall-pct'>"+pct+"%</div><div style='color:#666;'>Overall Score</div></div>";
+    +"<div class='overall'><div class='overall-pct'>"+(rec.pct!==undefined?rec.pct:calcPct())+"%</div><div style='color:#666;'>Overall Score</div></div>";
 
   S.cats.forEach(function(c){
     html += "<h2>"+esc(c.label)+"</h2>";
@@ -7872,9 +7898,15 @@ function buildInspectionPdfData(rec){
       var key = c.id+":"+item.id;
       var score = rec.scores&&rec.scores[key]!==undefined ? rec.scores[key] : "—";
       var comment = rec.comments&&rec.comments[key] ? rec.comments[key] : "";
-      html += "<div class='score-row'><span>"+esc(item.label)+"</span>"
-        +"<span class='score-val'>"+score+" <span class='cat-score'>/ "+c.scale+"</span></span></div>";
-      if(comment) html += "<div class='comment'>"+esc(comment)+"</div>";
+      var itype = item.inputType||"score";
+      if(itype==="score"){
+        html += "<div class='score-row'><span>"+esc(item.label)+"</span>"
+          +"<span class='score-val'>"+score+" <span class='cat-score'>/ "+c.scale+"</span></span></div>";
+        if(comment) html += "<div class='comment'>"+esc(comment)+"</div>";
+      } else if(itype!=="none"){
+        var shown = itype==="check" ? (comment==="Done" ? "Done" : "Not done") : itype==="number" ? (score==="—" ? "—" : score) : (comment||"—");
+        html += "<div class='score-row'><span>"+esc(item.label)+"</span><span class='score-val'>"+esc(String(shown))+"</span></div>";
+      }
     });
   });
 
@@ -10697,9 +10729,10 @@ function renderSettings(){
   } else if(tab==="inspection"){
     var syncBtn = "<button class='btn bp' style='width:100%;padding:10px;margin-bottom:14px;' data-a='save-cats-to-sheet'>&#x1F4BE; Sync Inspection Settings to All Devices</button>";
 
+    var _tally = inspTallyData();
     var catRows = (S.cats||[]).map(function(c,ci){
       var items = (c.items||[]).map(function(it,ii){
-        var typeOpts = ["Score","Text","Textarea","Number","Select","No Entry"].map(function(t){
+        var typeOpts = ["Score","Checkbox","Text","Textarea","Number","Select","No Entry"].map(function(t){
           return "<option value='"+t+"'"+(it.entryType===t?" selected":"")+">"+t+"</option>";
         }).join("");
         return "<div style='margin-bottom:8px;padding-left:12px;border-left:2px solid #1e3a5f;'>"
@@ -10722,9 +10755,11 @@ function renderSettings(){
       return "<div class='card' style='margin-bottom:10px;'>"
         +"<div style='display:flex;align-items:center;gap:8px;margin-bottom:10px;'>"
         +"<input class='inp' style='flex:1;padding:6px 8px;font-size:13px;' value='"+esc(c.label)+"' data-ci='"+ci+"' data-field='label'>"
-        +"<input type='number' class='inp' style='width:60px;padding:6px 8px;font-size:13px;' value='"+(c.scale||10)+"' data-ci='"+ci+"' data-field='scale' title='Max score'>"
+        +"<input type='number' min='1' class='inp' style='width:60px;padding:6px 8px;font-size:13px;' value='"+(c.scale||10)+"' data-ci='"+ci+"' data-field='scale' title='Points each scored item in this category is worth'>"
+        +"<span style='font-size:11px;color:#94a3b8;line-height:1.1;'>points<br>each item</span>"
         +"<button class='btn bd' style='padding:5px 9px;font-size:12px;' data-a='del-cat' data-v='"+ci+"'>X</button>"
         +"</div>"
+        +"<div id='cat-sum-"+ci+"' style='font-size:12px;color:#94a3b8;margin:-4px 0 10px;'>"+inspCatSumHtml(_tally.rows[ci], _tally.tot)+"</div>"
         +items
         +"<div style='display:flex;gap:6px;padding-left:12px;margin-top:6px;'>"
         +"<input class='inp' id='new-item-"+ci+"' style='flex:1;padding:5px 8px;font-size:12px;' placeholder='New item name'>"
@@ -10762,6 +10797,9 @@ function renderSettings(){
       +fieldRows
       +"<button class='btn bg' data-a='add-insp-field' style='width:100%;padding:8px;margin-bottom:16px;font-size:12px;'>+ Add Field</button>"
       +"<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin-bottom:8px;'>Inspection Categories</div>"
+      +"<div id='insp-tally' class='card' style='margin-bottom:10px;padding:12px 14px;'>"+inspTallyHtml(_tally)+"</div>"
+      +"<div style='font-size:12px;color:#94a3b8;line-height:1.6;margin-bottom:12px;'><b style='color:#e2e8f0;'>Item types.</b> Only <b>Score</b> items earn points.<br>"
+      +"<b>Score</b> - tech taps a number from 1 to the category's points.<br><b>Checkbox</b> - tech just checks \"Completed\". No points.<br><b>Text</b> / <b>Textarea</b> - a typed answer or notes. No points.<br><b>Number</b> - tech types a number, such as mileage. No points.<br><b>Select</b> - tech picks one answer from a list you type below the item, one option per line. No points.<br><b>No Entry</b> - the item is hidden from the form.</div>"
       +catRows
       +"<button class='btn bp' data-a='add-cat' style='width:100%;padding:10px;margin-top:8px;'>+ Add Category</button>";
   }
@@ -10837,13 +10875,14 @@ function renderSettings(){
           if(field==="requiresPhoto") S.cats[ci].items[ii].requiresPhoto = el.checked;
           else if(field==="maxPhotos") S.cats[ci].items[ii].maxPhotos = parseInt(el.value)||1;
           else if(field==="itemlabel") S.cats[ci].items[ii].label = el.value;
-          else if(field==="entryType") S.cats[ci].items[ii].entryType = el.value;
+          else if(field==="entryType"){ S.cats[ci].items[ii].entryType = el.value; S.cats[ci].items[ii].inputType = ({"Score":"score","Checkbox":"check","Text":"text","Textarea":"textarea","Number":"number","Select":"select","No Entry":"none"})[el.value]||"score"; }
           else if(field==="selectOptions") S.cats[ci].items[ii].selectOptions = el.value.split("\n").filter(Boolean);
         } else {
           if(field==="label") S.cats[ci].label = el.value;
           else if(field==="scale") S.cats[ci].scale = parseInt(el.value)||10;
         }
         lsSet("hub:cats", S.cats);
+        if(field==="scale" || field==="entryType") inspTallyRefresh();
       });
     });
   }, 50);
