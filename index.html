@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.14.6";
+const APP_VERSION = "6.14.7";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -6147,6 +6147,7 @@ document.addEventListener("input",function(e){
   if(t.id==="insp-inspector") S.inspData.inspector=t.value;
   if(t.id==="insp-notes") S.inspData.notes=t.value;
   if(t.dataset.commentkey) S.inspData.comments[t.dataset.commentkey]=t.value;
+  if(t.dataset.notifyemail){ var sel0 = inspEmailSelected(), em0 = t.dataset.notifyemail, ix0 = sel0.indexOf(em0); if(t.checked && ix0<0) sel0.push(em0); if(!t.checked && ix0>=0) sel0.splice(ix0,1); }
   if(t.dataset.checkkey){ if(t.checked) S.inspData.comments[t.dataset.checkkey]="Done"; else delete S.inspData.comments[t.dataset.checkkey]; }
   if(t.id==="new-truck-inp"||t.id==="new-tech-inp") {}
 });
@@ -7766,7 +7767,11 @@ function inspForm(){
       <div style="background:#0a1628;border-radius:10px;padding:16px;margin-bottom:16px;text-align:center;border:2px solid ${sc(pct)}30;">${ring(pct,90)}<div style="margin-top:6px;font-size:18px;font-weight:700;color:${sc(pct)}">${sl(pct)}</div><div style="color:#475569;font-size:12px;margin-top:2px;">${esc(inspData.truck)}</div></div>
       <input type="file" id="photo-file" accept="image/*" multiple style="display:none">
       <button class="btn bg" style="width:100%;padding:12px;margin-bottom:12px;" data-a="add-photo">Add Photos</button>
-      <div class="g3">${photos}</div>`;
+      <div class="g3" style="margin-bottom:16px;">${photos}</div>
+      <div class="card" style="padding:14px;"><div style="font-weight:600;font-size:14px;margin-bottom:4px;">Email this inspection to</div>
+        <div style="font-size:12px;color:#64748b;margin-bottom:10px;">Tick who should get the PDF link. Untick everyone to send no email.</div>
+        ${(function(){ var sel=inspEmailSelected(), ch=inspEmailChoices().list; if(!ch.length) return "<div style='font-size:12px;color:#f59e0b;'>No manager has an email address saved, so no email will be sent.</div>"; return ch.map(function(x){ return "<label style='display:flex;align-items:center;gap:10px;padding:7px 0;font-size:14px;cursor:pointer;'><input type='checkbox' data-notifyemail='"+esc(x.email)+"' "+(sel.indexOf(x.email)>=0?"checked":"")+" style='width:20px;height:20px;accent-color:#2563eb;'><span>"+esc(x.name)+(x.name!==x.email?" <span style='color:#64748b;font-size:12px;'>"+esc(x.email)+"</span>":"")+"</span></label>"; }).join(""); })()}
+      </div>`;
   }
   const back=`<button class="btn bg" style="flex:1;" data-a="insp-back">Back</button>`;
   const fwd=isPhotos?`<button class="btn bs" style="flex:2;" data-a="insp-save">Save Inspection</button>`:`<button class="btn bp" style="flex:2;" data-a="insp-next">Next</button>`;
@@ -7813,6 +7818,22 @@ function inspTallyRefresh(){
   var t = document.getElementById("insp-tally"); if(t) t.innerHTML = inspTallyHtml(d);
 }
 
+// Who can receive the inspection email, and who is ticked by default (the Notifications setting if set, otherwise every manager with an email)
+function inspEmailChoices(){
+  var nc = (S.notifConfig && S.notifConfig.inspection) || {};
+  var seen = {}, list = [];
+  (S.managers||[]).forEach(function(m){ var e = String(m.email||"").trim(); if(e && !seen[e.toLowerCase()]){ seen[e.toLowerCase()] = 1; list.push({email:e, name:m.name||e}); } });
+  var cfg = String(nc.emails||"").split(/[,;\s]+/).filter(Boolean);
+  cfg.forEach(function(e){ if(!seen[e.toLowerCase()]){ seen[e.toLowerCase()] = 1; list.push({email:e, name:e}); } });
+  var def = nc.enabled===false ? [] : (cfg.length ? cfg : list.map(function(x){ return x.email; }));
+  return {list:list, def:def};
+}
+function inspEmailSelected(){
+  var c = inspEmailChoices();
+  if(!Array.isArray(S.inspData.notifyTo)) S.inspData.notifyTo = c.def.slice();
+  return S.inspData.notifyTo;
+}
+
 function calcPct(){
   let e=0,p=0;
   S.cats.forEach(c=>c.items.filter(i=>(i.inputType||"score")==="score").forEach(item=>{p+=c.scale;const s=S.inspData.scores[c.id+":"+item.id];if(s!==undefined)e+=s;}));
@@ -7847,7 +7868,9 @@ function captureItemPhoto(input){
 
 async function saveInsp(){
   const pct=calcPct();
+  const notifyTo = inspEmailSelected().slice();
   const rec={id:uid(),date:new Date().toISOString(),...S.inspData,pct};
+  delete rec.notifyTo;
   S.inspections.unshift(rec);
   S.inspView="home"; save(); render();
   const catH=S.cats.flatMap(c=>c.items.map(i=>c.label+": "+i.label+" (/"+c.scale+")"));
@@ -7869,8 +7892,7 @@ async function saveInsp(){
     else console.warn("Inspection PDF not saved:", pdfRes && pdfRes.error);
   } catch(e){ console.warn("PDF build/save failed:", e); }
   try {
-    var ncI = (S.notifConfig && S.notifConfig.inspection) || {};
-    var toI = ncI.enabled===false ? "" : (ncI.emails || (S.managers||[]).map(function(m){ return m.email; }).filter(Boolean).join(","));
+    var toI = notifyTo.join(",");
     if(toI){
       var bodyI = "A fleet inspection was submitted.\n\nTruck: "+(rec.truck||"")+"\nInspector: "+(rec.inspector||S.currentTech||S.managerName||"")+"\nMileage: "+(rec.mileage||"-")+"\nOverall score: "+pct+"%\n"
         +(rec.notes ? "\nNotes: "+rec.notes+"\n" : "")
@@ -7878,7 +7900,7 @@ async function saveInsp(){
       await sendEmail(toI, "[Fox Pest Control] Fleet Inspection: "+(rec.truck||"")+" ("+pct+"%)", bodyI);
     }
   } catch(e){ console.warn("Inspection email failed:", e); }
-  showToast(pdfOk ? "Inspection saved. PDF filed and managers emailed." : "Inspection saved. The PDF could not be filed - see a manager.");
+  showToast((pdfOk ? "Inspection saved. PDF filed" : "Inspection saved. The PDF could not be filed - see a manager") + (pdfOk ? (notifyTo.length ? " and emailed." : ", no email sent.") : "."));
 }
 
 function buildInspectionPdfData(rec){
