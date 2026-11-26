@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.14.4";
+const APP_VERSION = "6.14.5";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -7728,7 +7728,7 @@ function inspForm(){
         btns=`<input type="number" class="inp" style="font-size:15px;padding:7px 10px;width:120px;" placeholder="0" value="${inspData.scores[key]!==undefined?inspData.scores[key]:""}" data-key="${key}" data-type="score">`;
       } else if(inputType==="select"){
         const selOpts=(item.selectOptions||[]).map(o=>`<option value="${esc(o)}"${inspData.comments[key]===o?" selected":""}>${esc(o)}</option>`).join("");
-        btns=`<select class="inp" style="font-size:13px;" data-commentkey="${key}"><option value="">-- Select --</option>${selOpts}</select>`;
+        btns=`<select class="inp" style="font-size:13px;" data-commentkey="${key}"><option value="">-- Select --</option>${selOpts}</select>${(item.selectOptions||[]).length?"":`<div style="font-size:11px;color:#f59e0b;margin-top:4px;">No choices have been set up for this item yet (Settings &gt; Inspection).</div>`}`;
       }
       const noteType2=item.noteType||"text";
       const comment=item.hc?(noteType2==="textarea"?`<textarea class="inp" rows="2" style="margin-top:8px;font-size:13px;padding:7px 10px;" placeholder="Notes (optional)" data-commentkey="${key}">${esc(inspData.comments[key]||"")}</textarea>`:`<input type="${noteType2}" class="inp" style="margin-top:8px;font-size:13px;padding:7px 10px;" placeholder="Notes (optional)" value="${esc(inspData.comments[key]||"")}" data-commentkey="${key}">`):"";
@@ -10748,7 +10748,7 @@ function renderSettings(){
           +"<label style='display:flex;align-items:center;gap:5px;font-size:12px;color:#94a3b8;'>Max: "
           +"<input type='number' class='inp' style='width:50px;padding:3px 6px;font-size:12px;' value='"+(it.maxPhotos||1)+"' min='1' max='10' data-ci='"+ci+"' data-ii='"+ii+"' data-field='maxPhotos'>"
           +"</label></div>"
-          +(it.entryType==="Select"?"<div style='margin-top:4px;'><textarea class='inp' style='font-size:11px;padding:4px;width:100%;height:50px;' data-ci='"+ci+"' data-ii='"+ii+"' data-field='selectOptions' placeholder='Options, one per line'>"+esc((it.selectOptions||[]).join("\n"))+"</textarea></div>":"")
+          +(it.entryType==="Select"?"<div style='margin-top:4px;'><div style='font-size:11px;color:#94a3b8;margin-bottom:3px;'>Choices the tech can pick from (type one per line):</div><textarea class='inp' style='font-size:12px;padding:6px;width:100%;height:90px;' data-ci='"+ci+"' data-ii='"+ii+"' data-field='selectOptions' placeholder='Good&#10;Needs service&#10;N/A'>"+esc((it.selectOptions||[]).join("\n"))+"</textarea></div>":"")
           +"</div>";
       }).join("");
 
@@ -10883,6 +10883,7 @@ function renderSettings(){
         }
         lsSet("hub:cats", S.cats);
         if(field==="scale" || field==="entryType") inspTallyRefresh();
+        if(field==="entryType") renderSettings();   // show or hide the choices box for Select items
       });
     });
   }, 50);
