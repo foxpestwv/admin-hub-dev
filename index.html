@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.14.5";
+const APP_VERSION = "6.14.6";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -4902,6 +4902,10 @@ async function gs(fn, data){
       }
 
       // ── INSPECTIONS ───────────────────────────────────────────────────────────
+      case "saveInspectionPdf": {
+        var pdfResp = await fetch(EMAIL_BRIDGE, {method:"POST", headers:{"Content-Type":"text/plain"}, body:JSON.stringify({action:"saveInspectionPdf", data:data})}).then(function(r){ return r.json(); }).catch(function(e){ return {ok:false, error:e.message}; });
+        return pdfResp;
+      }
       case "logInspection": {
         var inspId = "insp_"+Date.now();
         await fbSet("inspections", inspId, Object.assign({}, data, {id:inspId, date:new Date().toISOString(), branch:data.branch||S.branch||"willamette"}));
@@ -6138,6 +6142,7 @@ document.addEventListener("change",function(e){
 
 document.addEventListener("input",function(e){
   const t=e.target;
+  if(t.id && t.id.indexOf("insp-field-")===0) S.inspData[t.id.slice(11)]=t.value;   // every Info-page field (vehicle, mileage, inspector, notes and any you add)
   if(t.id==="insp-mileage") S.inspData.mileage=t.value;
   if(t.id==="insp-inspector") S.inspData.inspector=t.value;
   if(t.id==="insp-notes") S.inspData.notes=t.value;
@@ -7781,6 +7786,7 @@ function inspDetail(){
   const photos=r.photos?.length?`<div class="card" style="margin-top:8px;"><div style="font-size:11px;color:#475569;text-transform:uppercase;margin-bottom:10px;">Photos (${r.photos.length})</div><div class="g3">${r.photos.map(ph=>`<img src="${ph.data}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:7px;">`).join("")}</div></div>`:"";
   return `<div style="display:flex;gap:10px;align-items:center;margin-bottom:16px;"><button class="btn bg" data-a="insp-view" data-v="list">Back</button><button class="btn bd" data-a="insp-del" data-v="${r.id}">Delete</button></div>
     <div style="display:flex;gap:14px;align-items:center;margin-bottom:20px;">${ring(r.pct,72)}<div><h2 style="font-size:20px;font-weight:700;">${esc(r.truck)}</h2><div style="color:#475569;font-size:13px;margin-top:3px;">${fd(r.date)}${r.inspector?" - "+esc(r.inspector):""}</div>${r.mileage?`<div style="color:#64748b;font-size:12px;margin-top:2px;">${Number(r.mileage).toLocaleString()} miles</div>`:""}</div></div>
+    ${(S.inspFields||[]).filter(f=>["truck","mileage","inspector","notes"].indexOf(f.id)<0&&r[f.id]).map(f=>`<div class="card" style="margin-bottom:8px;padding:10px 14px;"><div style="font-size:11px;color:#475569;text-transform:uppercase;margin-bottom:3px;">${esc(f.label)}</div><div style="font-size:13px;color:#cbd5e1;">${esc(String(r[f.id]))}</div></div>`).join("")}
     ${r.notes?`<div class="card" style="margin-bottom:12px;"><div style="font-size:11px;color:#475569;text-transform:uppercase;margin-bottom:5px;">Notes</div><p style="font-size:13px;color:#cbd5e1;">${esc(r.notes)}</p></div>`:""}
     ${cats}${photos}`;
 }
@@ -7848,20 +7854,31 @@ async function saveInsp(){
   const headers=["Date","Truck","Inspector","Mileage","Overall %",...catH];
   const catS=S.cats.flatMap(c=>c.items.map(item=>{const s=S.inspData.scores[c.id+":"+item.id];return s!==undefined?s:"";}));
   const row=[new Date(rec.date).toLocaleDateString("en-US"),rec.truck,rec.inspector||"",rec.mileage||"",pct,...catS];
-  try { await gs("logInspectionServer",{headers,row}); } catch(e){}
 
   // Save inspection to Firebase with branch tag
   try {
     await gs("logInspection", Object.assign({}, rec, {branch:S.branch||"willamette"}));
   } catch(e){ console.warn("Firebase inspection save:", e); }
 
-  // Generate PDF of inspection and save to Drive
+  // Generate a PDF of the inspection, save it to Drive, and email the managers a link
+  var pdfUrl = "", pdfOk = false;
   try {
     var pdfData = buildInspectionPdfData(rec);
-    gs("saveInspectionPdfServer", pdfData).then(function(res){
-      if(res&&res.ok) console.log("Inspection PDF saved:", res.fileId);
-    }).catch(function(e){ console.warn("PDF save failed:", e); });
-  } catch(e){ console.warn("PDF build failed:", e); }
+    var pdfRes = await gs("saveInspectionPdfServer", pdfData);
+    if(pdfRes && pdfRes.ok){ pdfOk = true; pdfUrl = pdfRes.url || ""; }
+    else console.warn("Inspection PDF not saved:", pdfRes && pdfRes.error);
+  } catch(e){ console.warn("PDF build/save failed:", e); }
+  try {
+    var ncI = (S.notifConfig && S.notifConfig.inspection) || {};
+    var toI = ncI.enabled===false ? "" : (ncI.emails || (S.managers||[]).map(function(m){ return m.email; }).filter(Boolean).join(","));
+    if(toI){
+      var bodyI = "A fleet inspection was submitted.\n\nTruck: "+(rec.truck||"")+"\nInspector: "+(rec.inspector||S.currentTech||S.managerName||"")+"\nMileage: "+(rec.mileage||"-")+"\nOverall score: "+pct+"%\n"
+        +(rec.notes ? "\nNotes: "+rec.notes+"\n" : "")
+        +(pdfUrl ? "\nPDF: "+pdfUrl+"\n" : "\n(The PDF could not be saved this time. The inspection itself is saved in the app.)\n");
+      await sendEmail(toI, "[Fox Pest Control] Fleet Inspection: "+(rec.truck||"")+" ("+pct+"%)", bodyI);
+    }
+  } catch(e){ console.warn("Inspection email failed:", e); }
+  showToast(pdfOk ? "Inspection saved. PDF filed and managers emailed." : "Inspection saved. The PDF could not be filed - see a manager.");
 }
 
 function buildInspectionPdfData(rec){
@@ -7889,6 +7906,7 @@ function buildInspectionPdfData(rec){
     +"<div style='font-size:11px;color:#666;'>Truck: "+esc(rec.truck||"")+"</div>"
     +"<div style='font-size:11px;color:#666;'>Inspector: "+esc(rec.inspector||"")+"</div>"
     +(rec.mileage?"<div style='font-size:11px;color:#666;'>Mileage: "+esc(rec.mileage)+"</div>":"")
+    +(S.inspFields||[]).filter(function(f){ return ["truck","mileage","inspector","notes"].indexOf(f.id)<0 && f.enabled!==false && rec[f.id]; }).map(function(f){ return "<div style='font-size:11px;color:#666;'>"+esc(f.label)+": "+esc(String(rec[f.id]))+"</div>"; }).join("")
     +"</div></div>"
     +"<div class='overall'><div class='overall-pct'>"+(rec.pct!==undefined?rec.pct:calcPct())+"%</div><div style='color:#666;'>Overall Score</div></div>";
 
@@ -7901,11 +7919,11 @@ function buildInspectionPdfData(rec){
       var itype = item.inputType||"score";
       if(itype==="score"){
         html += "<div class='score-row'><span>"+esc(item.label)+"</span>"
-          +"<span class='score-val'>"+score+" <span class='cat-score'>/ "+c.scale+"</span></span></div>";
+          +"<span class='score-val'> - "+score+" <span class='cat-score'>/ "+c.scale+"</span></span></div>";
         if(comment) html += "<div class='comment'>"+esc(comment)+"</div>";
       } else if(itype!=="none"){
         var shown = itype==="check" ? (comment==="Done" ? "Done" : "Not done") : itype==="number" ? (score==="—" ? "—" : score) : (comment||"—");
-        html += "<div class='score-row'><span>"+esc(item.label)+"</span><span class='score-val'>"+esc(String(shown))+"</span></div>";
+        html += "<div class='score-row'><span>"+esc(item.label)+"</span><span class='score-val'> - "+esc(String(shown))+"</span></div>";
       }
     });
   });
@@ -10697,6 +10715,7 @@ function renderSettings(){
       {key:"restock_received",  label:"✅ Restock Received",         desc:"When a restock is marked as received"},
       {key:"tech_request",      label:"🛒 Tech Product Request",     desc:"When a tech submits a product checkout request"},
       {key:"order_decision",    label:"📋 Order Approved/Denied",    desc:"Manager copy when tech order is decided"},
+      {key:"inspection",        label:"🚛 Fleet Inspection",         desc:"When a truck inspection is submitted (PDF link included)"},
       {key:"low_stock",         label:"⚠️ Low Stock Alert",          desc:"When inventory drops below threshold"},
       {key:"sign_request",      label:"✍️ Sign Request",             desc:"When a document needs signing"},
       {key:"ooo_form",          label:"📝 OOO/1-on-1 Form",         desc:"When a tech submits a 1-on-1 form"},
