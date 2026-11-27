@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.3";
+const APP_VERSION = "6.15.4";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -2377,12 +2377,25 @@ function bsDocId(){ return S.branch && S.branch!=="all" ? "branchSetup_"+S.branc
 async function bsLoad(){
   S.branchSetup = null;
   var id = bsDocId(); if(!id) return;
-  try { S.branchSetup = await fbGet("config", id); } catch(e){ S.branchSetup = null; S._bsErr = e.message; }
+  try { S.branchSetup = await fbGet("config", id); } catch(e){ S.branchSetup = null; S._bsErr = "reading the record - "+e.message; }
   // A branch made before Branch Setup existed has no record yet: its main admin's sign-in makes one
   if(!S.branchSetup && !S._bsErr && !BRANCHES[S.branch] && S.role==="manager"){
-    try { var nd = {complete:false, branchName:S.branchName||S.branch, createdAt:new Date().toISOString()}; await fbSet("config", id, nd); S.branchSetup = nd; } catch(e){ S._bsErr = e.message; }
+    try { var nd = {complete:false, branchName:S.branchName||S.branch, createdAt:new Date().toISOString()}; await fbSet("config", id, nd); S.branchSetup = nd; } catch(e){ S._bsErr = "creating the record - "+e.message; }
   }
   if(S.role && S.tab==="dashboard" && typeof renderDash==="function") renderDash();
+}
+async function bsDiag(){
+  if(S._bsDiag) return;
+  S._bsDiag = "checking sign-in...";
+  try {
+    await initFirebase();
+    var u = _auth && _auth.currentUser, t = "signed in: "+(u ? (u.isAnonymous ? "anonymous (not a full sign-in)" : u.email) : "no")+"; ";
+    if(u && !u.isAnonymous){
+      try { var pr = await _db.collection("users").doc(u.uid).get(); t += pr.exists ? "profile role="+pr.data().role+", branch="+pr.data().branch : "no profile document"; } catch(e){ t += "profile unreadable"; }
+    }
+    S._bsDiag = t;
+  } catch(e){ S._bsDiag = "sign-in check failed: "+e.message; }
+  if(S.settingsTab==="branchsetup") renderSettings();
 }
 function bsNewBranchMgr(){ return S.role==="manager" && !!S.branch && S.branch!=="all" && !BRANCHES[S.branch]; }
 function bsCanSetup(){ return !!(S.branchSetup && (homeIsAdmin() || S.role==="superadmin" || bsNewBranchMgr())) || bsNewBranchMgr(); }
@@ -2421,7 +2434,8 @@ function bsItemHtml(kind, def, cur){
 }
 function bsHtml(){
   if(!S.branchSetup){
-    if(bsNewBranchMgr()) return "<h2 style='font-size:18px;font-weight:700;margin-bottom:8px;'>Branch Setup</h2><div class='card' style='padding:14px;font-size:13px;color:#f87171;line-height:1.5;margin-bottom:10px;'>This branch's setup record could not be loaded"+(S._bsErr?": "+esc(S._bsErr):".")+"<br><span style='color:#94a3b8;font-size:12px;'>Branch id: "+esc(S.branch||"")+"</span></div><button class='btn bp' style='width:100%;padding:11px;' data-a='bs-retry'>Try again</button>";
+    if(bsNewBranchMgr()) bsDiag();
+    if(bsNewBranchMgr()) return "<h2 style='font-size:18px;font-weight:700;margin-bottom:8px;'>Branch Setup</h2><div class='card' style='padding:14px;font-size:13px;color:#f87171;line-height:1.5;margin-bottom:10px;'>This branch's setup record could not be loaded"+(S._bsErr?": "+esc(S._bsErr):".")+"<br><span style='color:#94a3b8;font-size:12px;'>Branch id: "+esc(S.branch||"")+"<br>"+esc(S._bsDiag||"checking sign-in...")+"</span></div><button class='btn bp' style='width:100%;padding:11px;' data-a='bs-retry'>Try again</button>";
     return "<div class='card' style='padding:16px;font-size:13px;color:#94a3b8;'>This branch uses the company's built-in folders and sheets, so there is nothing to set up.</div>";
   }
   var d = S.branchSetup, k = S._bs = S._bs||{links:{}}, miss = bsMissing(), done = d.complete===true;
@@ -2459,7 +2473,7 @@ function bsBanner(){
   pg.insertBefore(d, pg.firstChild);
 }
 async function bsAct(a, v){
-  if(a==="bs-retry"){ S._bsErr = null; await bsLoad(); renderSettings(); return; }
+  if(a==="bs-retry"){ S._bsErr = null; S._bsDiag = null; await bsLoad(); renderSettings(); return; }
   if(a==="bs-open"){ S.tab="settings"; S.settingsTab="branchsetup"; render(); return; }
   bsCapture(); var k = S._bs;
   var dev = isDevCopy();
