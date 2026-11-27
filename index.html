@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.1";
+const APP_VERSION = "6.15.2";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -2377,7 +2377,11 @@ function bsDocId(){ return S.branch && S.branch!=="all" ? "branchSetup_"+S.branc
 async function bsLoad(){
   S.branchSetup = null;
   var id = bsDocId(); if(!id) return;
-  try { S.branchSetup = await fbGet("config", id); } catch(e){ S.branchSetup = null; }
+  try { S.branchSetup = await fbGet("config", id); } catch(e){ S.branchSetup = null; S._bsErr = e.message; }
+  // A branch made before Branch Setup existed has no record yet: its main admin's sign-in makes one
+  if(!S.branchSetup && !S._bsErr && !BRANCHES[S.branch] && S.role==="manager" && homeIsAdmin()){
+    try { var nd = {complete:false, branchName:S.branchName||S.branch, createdAt:new Date().toISOString()}; await fbSet("config", id, nd); S.branchSetup = nd; } catch(e){ S._bsErr = e.message; }
+  }
   if(S.role && S.tab==="dashboard" && typeof renderDash==="function") renderDash();
 }
 function bsCanSetup(){ return !!(S.branchSetup && (homeIsAdmin() || S.role==="superadmin")); }
@@ -6053,8 +6057,7 @@ function login(role){
   if(role==="manager" && S.currentUser) S.currentTech=S.currentUser.name;
   document.getElementById("login").style.display="none";
   document.getElementById("app").style.display="block";
-  bsLoad();
-  syncFromSheet().then(function(){ render(); }).catch(function(){ render(); });
+  syncFromSheet().then(function(){ render(); return bsLoad(); }).catch(function(){ render(); return bsLoad(); });
   // Don't call saveAccountsToSheet here - it overwrites branch accounts
   // Show welcome splash after login
   setTimeout(function(){ showWelcomeSplash(); }, 600);
