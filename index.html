@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.4";
+const APP_VERSION = "6.15.5";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -6636,6 +6636,8 @@ async function handleAction(a,v,el,e){
     await initFirebase();
     await _db.collection("branches").doc(bId).set({name:bName, createdAt:new Date().toISOString()});
     try { await _db.collection("config").doc("branchSetup_"+bId).set({complete:false, branchName:bName, createdAt:new Date().toISOString()}); } catch(e){ showToast("Branch added, but its setup record could not be created: "+e.message); }
+    // a new branch is secure from day one: its people get real sign-ins, so the database knows who they are
+    try { var sf = {}; sf[bId] = true; await _db.collection("config").doc("security").set({branches:sf}, {merge:true}); _secureFlags = null; } catch(e){ showToast("Branch added, but it could not be marked secure: "+e.message); }
     showToast(bName+" added ✓ - add its main admin next");
     renderSuperAdmin();
     return;
