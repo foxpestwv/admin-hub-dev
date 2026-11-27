@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.2";
+const APP_VERSION = "6.15.3";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -2379,12 +2379,13 @@ async function bsLoad(){
   var id = bsDocId(); if(!id) return;
   try { S.branchSetup = await fbGet("config", id); } catch(e){ S.branchSetup = null; S._bsErr = e.message; }
   // A branch made before Branch Setup existed has no record yet: its main admin's sign-in makes one
-  if(!S.branchSetup && !S._bsErr && !BRANCHES[S.branch] && S.role==="manager" && homeIsAdmin()){
+  if(!S.branchSetup && !S._bsErr && !BRANCHES[S.branch] && S.role==="manager"){
     try { var nd = {complete:false, branchName:S.branchName||S.branch, createdAt:new Date().toISOString()}; await fbSet("config", id, nd); S.branchSetup = nd; } catch(e){ S._bsErr = e.message; }
   }
   if(S.role && S.tab==="dashboard" && typeof renderDash==="function") renderDash();
 }
-function bsCanSetup(){ return !!(S.branchSetup && (homeIsAdmin() || S.role==="superadmin")); }
+function bsNewBranchMgr(){ return S.role==="manager" && !!S.branch && S.branch!=="all" && !BRANCHES[S.branch]; }
+function bsCanSetup(){ return !!(S.branchSetup && (homeIsAdmin() || S.role==="superadmin" || bsNewBranchMgr())) || bsNewBranchMgr(); }
 function bsMissing(){
   var d = S.branchSetup||{}, miss = [];
   BS_FOLDERS.forEach(function(f){ if(!(d.folders&&d.folders[f.k]&&d.folders[f.k].id)) miss.push(f.k); });
@@ -2419,7 +2420,10 @@ function bsItemHtml(kind, def, cur){
   return h+"</div>";
 }
 function bsHtml(){
-  if(!S.branchSetup) return "<div class='card' style='padding:16px;font-size:13px;color:#94a3b8;'>This branch uses the company's built-in folders and sheets, so there is nothing to set up.</div>";
+  if(!S.branchSetup){
+    if(bsNewBranchMgr()) return "<h2 style='font-size:18px;font-weight:700;margin-bottom:8px;'>Branch Setup</h2><div class='card' style='padding:14px;font-size:13px;color:#f87171;line-height:1.5;margin-bottom:10px;'>This branch's setup record could not be loaded"+(S._bsErr?": "+esc(S._bsErr):".")+"<br><span style='color:#94a3b8;font-size:12px;'>Branch id: "+esc(S.branch||"")+"</span></div><button class='btn bp' style='width:100%;padding:11px;' data-a='bs-retry'>Try again</button>";
+    return "<div class='card' style='padding:16px;font-size:13px;color:#94a3b8;'>This branch uses the company's built-in folders and sheets, so there is nothing to set up.</div>";
+  }
   var d = S.branchSetup, k = S._bs = S._bs||{links:{}}, miss = bsMissing(), done = d.complete===true;
   var me = (S.currentUser&&S.currentUser.email)||"";
   var h = "<h2 style='font-size:18px;font-weight:700;margin-bottom:6px;'>Branch Setup</h2>"
@@ -2446,7 +2450,7 @@ function bsHtml(){
 }
 function bsBanner(){
   var pg = document.getElementById("pg-dashboard");
-  if(!pg || !S.branchSetup || S.branchSetup.complete || !homeIsAdmin() || pg.querySelector("#bs-banner")) return;
+  if(!pg || !S.branchSetup || S.branchSetup.complete || !(homeIsAdmin() || bsNewBranchMgr()) || pg.querySelector("#bs-banner")) return;
   var d = document.createElement("div"); d.id = "bs-banner"; d.className = "card";
   d.style.cssText = "margin:12px 16px;padding:14px;border:1px solid #f59e0b66;";
   d.innerHTML = "<div style='font-weight:700;color:#f59e0b;font-size:14px;'>Finish setting up your branch</div>"
@@ -2455,6 +2459,7 @@ function bsBanner(){
   pg.insertBefore(d, pg.firstChild);
 }
 async function bsAct(a, v){
+  if(a==="bs-retry"){ S._bsErr = null; await bsLoad(); renderSettings(); return; }
   if(a==="bs-open"){ S.tab="settings"; S.settingsTab="branchsetup"; render(); return; }
   bsCapture(); var k = S._bs;
   var dev = isDevCopy();
