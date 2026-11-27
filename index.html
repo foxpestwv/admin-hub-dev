@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.14.7";
+const APP_VERSION = "6.15.0";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -1977,7 +1977,7 @@ const APP_PROD_URL = "https://foxpestwv.github.io/admin-hub";
 function saWelcomeEmail(mgr, branchName){
   var first = String((mgr && mgr.name) || "").trim().split(" ")[0] || "there";
   var branch = branchName || "your branch", admin = !!(mgr && mgr.isAdmin);
-  var adminLine = admin ? "You're set up as the main admin for "+branch+". Under Settings → Home Screen you choose which screens each role sees, and you can authorize other managers to do the same." : "";
+  var adminLine = admin ? "You're set up as the main admin for "+branch+". Under Settings → Home Screen you choose which screens each role sees, and you can authorize other managers to do the same. If this is a new branch, your first job is Settings → Branch Setup, where you choose where your branch's forms, documents and sheets are saved." : "";
   var text = "Hi "+first+",\n\nWelcome to the Fox Pest Control Admin Hub. Your account for "+branch+" is ready.\n\n"
     +"Web address:\n"+APP_PROD_URL+"\n\n"
     +"To sign in the first time:\n"
@@ -2333,20 +2333,177 @@ async function devCopyLiveData(){
   }
   return {counts:counts, total:total};
 }
-// Everything the test copy sends to the bridge is marked as a test, so the bridge never touches real sheets, folders or inboxes
+// Every request to the Apps Script bridge: carries the branch and that branch's own folders/sheets (Settings > Branch Setup),
+// and on the test copy is marked as a test so the bridge never touches real sheets, folders or inboxes
 function installDevBridgeFlag(){
   if(window._devFetchWrapped) return; window._devFetchWrapped = true;
   var orig = window.fetch.bind(window);
   window.fetch = function(url, opts){
     try {
       if(typeof EMAIL_BRIDGE!=="undefined" && String(url).indexOf(EMAIL_BRIDGE)===0 && opts && typeof opts.body==="string"){
-        var b = JSON.parse(opts.body); b.dev = true;
-        if(b.data && typeof b.data==="object") b.data.dev = true;
+        var b = JSON.parse(opts.body);
+        if(isDevCopy()){ b.dev = true; if(b.data && typeof b.data==="object") b.data.dev = true; }
+        if(b.data && typeof b.data==="object" && !Array.isArray(b.data)){
+          var br = b.data.branch || b.data.branchId;
+          if(!br && S && S.branch && S.branch!=="all"){ br = S.branch; b.data.branch = br; }
+          if(br && S && br===S.branch){
+            if(S.branchSetup && !b.data.setup) b.data.setup = S.branchSetup;
+            if(S.branchName && !b.data.branchName) b.data.branchName = S.branchName;
+          }
+        }
         opts = Object.assign({}, opts, {body: JSON.stringify(b)});
       }
     } catch(x){}
     return orig(url, opts);
   };
+}
+installDevBridgeFlag();
+
+// ─── Branch Setup: the branch's main admin picks where its files and sheets live ─────────────────
+var BS_FOLDERS = [
+  {k:"signed",      q:"Where would you like completed QA and Ride Along forms stored?"},
+  {k:"docs",        q:"Where would you like signed and other documents stored?"},
+  {k:"ooo",         q:"Where would you like out-of-office notices stored?"},
+  {k:"inspections", q:"Where would you like fleet inspection PDFs stored?"},
+  {k:"estimates",   q:"Where would you like estimates stored? (a folder for each employee is made inside it)"}
+];
+var BS_SHEETS = [
+  {k:"order", q:"Order sheet", note:"Your copy starts with the company's product list."},
+  {k:"qa",    q:"QA sheet", note:"Completed QA forms are written here."},
+  {k:"ra",    q:"Ride Along sheet", note:"Completed Ride Along forms are written here."}
+];
+function bsExtractId(v){ var m = String(v||"").match(/[-\w]{25,}/); return m ? m[0] : ""; }
+function bsDocId(){ return S.branch && S.branch!=="all" ? "branchSetup_"+S.branch : null; }
+async function bsLoad(){
+  S.branchSetup = null;
+  var id = bsDocId(); if(!id) return;
+  try { S.branchSetup = await fbGet("config", id); } catch(e){ S.branchSetup = null; }
+  if(S.role && S.tab==="dashboard" && typeof renderDash==="function") renderDash();
+}
+function bsCanSetup(){ return !!(S.branchSetup && (homeIsAdmin() || S.role==="superadmin")); }
+function bsMissing(){
+  var d = S.branchSetup||{}, miss = [];
+  BS_FOLDERS.forEach(function(f){ if(!(d.folders&&d.folders[f.k]&&d.folders[f.k].id)) miss.push(f.k); });
+  BS_SHEETS.forEach(function(f){ if(!(d.sheets&&d.sheets[f.k]&&d.sheets[f.k].id)) miss.push(f.k); });
+  return miss;
+}
+async function bsSave(patch){
+  var d = S.branchSetup = Object.assign({}, S.branchSetup||{}, patch, {updatedAt:new Date().toISOString()});
+  await fbSet("config", bsDocId(), d);
+}
+async function bsBridge(action, data){
+  var r = await fetch(EMAIL_BRIDGE, {method:"POST", headers:{"Content-Type":"text/plain"}, body:JSON.stringify({action:action, data:data})});
+  return r.json();
+}
+function bsCapture(){
+  var k = S._bs = S._bs||{links:{}}; k.links = k.links||{};
+  document.querySelectorAll("[data-bslink]").forEach(function(i){ k.links[i.getAttribute("data-bslink")] = i.value; });
+  var m = document.querySelector("input[name=bsmode]:checked"); if(m) k.mode = m.value;
+  var pl = document.getElementById("bs-parent"); if(pl) k.parent = pl.value;
+}
+function bsItemHtml(kind, def, cur){
+  var k = S._bs||{links:{}}, link = (k.links||{})[def.k]||"";
+  var h = "<div class='card' style='margin-bottom:8px;padding:12px 14px;'><div style='font-size:13px;font-weight:600;margin-bottom:6px;'>"+esc(def.q)+"</div>";
+  if(def.note) h += "<div style='font-size:11px;color:#94a3b8;margin-bottom:6px;'>"+esc(def.note)+"</div>";
+  if(cur && cur.id){
+    h += "<div style='font-size:12px;color:#22c55e;'>✓ "+esc(cur.name||"Connected")+(cur.url?" · <a href='"+esc(cur.url)+"' target='_blank' style='color:#60a5fa;'>Open</a>":"")+"</div>"
+      +"<div style='font-size:11px;color:#64748b;margin:8px 0 4px;'>To use a different one, paste its link:</div>";
+  }
+  h += "<div style='display:flex;gap:6px;'><input class='inp' style='flex:1;font-size:12px;padding:7px;' data-bslink='"+def.k+"' placeholder='Paste a Google Drive "+(kind==="folder"?"folder":"sheet")+" link' value='"+esc(link)+"'>"
+    +"<button class='btn bg' style='padding:7px 12px;font-size:12px;' data-a='bs-check-"+kind+"' data-v='"+def.k+"'>Check</button></div>";
+  if(k.msg && k.msgKey===def.k) h += "<div style='font-size:12px;margin-top:6px;color:"+(k.msgOk?"#22c55e":"#f87171")+";line-height:1.4;'>"+esc(k.msg)+"</div>";
+  return h+"</div>";
+}
+function bsHtml(){
+  if(!S.branchSetup) return "<div class='card' style='padding:16px;font-size:13px;color:#94a3b8;'>This branch uses the company's built-in folders and sheets, so there is nothing to set up.</div>";
+  var d = S.branchSetup, k = S._bs = S._bs||{links:{}}, miss = bsMissing(), done = d.complete===true;
+  var me = (S.currentUser&&S.currentUser.email)||"";
+  var h = "<h2 style='font-size:18px;font-weight:700;margin-bottom:6px;'>Branch Setup</h2>"
+    +"<div style='font-size:12px;color:#94a3b8;line-height:1.5;margin-bottom:12px;'>Choose where "+esc(S.branchName||"your branch")+" keeps its files and sheets. Your answers save as you go, so you can finish later.</div>"
+    +"<div class='card' style='margin-bottom:12px;padding:12px 14px;border:1px solid "+(miss.length?"#f59e0b55":"#22c55e55")+";'><div style='font-size:13px;font-weight:700;color:"+(miss.length?"#f59e0b":"#22c55e")+";'>"
+    +(miss.length ? (8-miss.length)+" of 8 done" : (done ? "✓ Setup complete" : "All 8 done - ready to finish"))+"</div></div>";
+  h += "<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin:4px 0 8px;'>1. Your folders</div>"
+    +"<div class='card' style='margin-bottom:8px;padding:12px 14px;'>"
+    +"<label style='display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px;'><input type='radio' name='bsmode' value='auto' "+(k.mode!=="paste"?"checked":"")+"> <span>Create the folders for me<br><span style='font-size:11px;color:#94a3b8;'>Makes a \"Fox Admin Hub - "+esc(S.branchName||"Branch")+"\" folder with a folder for each kind of file, and shares it with "+esc(me)+".</span></span></label>"
+    +"<label style='display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px;'><input type='radio' name='bsmode' value='paste' "+(k.mode==="paste"?"checked":"")+"> <span>Create them inside a folder I already have<br><span style='font-size:11px;color:#94a3b8;'>Paste its link. It must be shared with the app's Google account as an Editor.</span></span></label>"
+    +(k.mode==="paste" ? "<input class='inp' id='bs-parent' style='width:100%;font-size:12px;padding:7px;margin-bottom:8px;' placeholder='Paste a Google Drive folder link' value='"+esc(k.parent||"")+"'>" : "")
+    +"<button class='btn bp' style='width:100%;padding:10px;' data-a='bs-create-folders'"+(k.busy?" disabled":"")+">"+(k.busy==="folders"?"Working...":"Create my folders")+"</button>"
+    +(k.msg && k.msgKey==="folders" ? "<div style='font-size:12px;margin-top:6px;color:"+(k.msgOk?"#22c55e":"#f87171")+";'>"+esc(k.msg)+"</div>" : "")
+    +"</div>"
+    +"<div style='font-size:12px;color:#94a3b8;margin:10px 0 8px;'>Or point each one at a folder you already use:</div>"
+    +BS_FOLDERS.map(function(f){ return bsItemHtml("folder", f, (d.folders||{})[f.k]); }).join("");
+  h += "<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin:16px 0 8px;'>2. Your sheets</div>"
+    +"<button class='btn bp' style='width:100%;padding:10px;margin-bottom:8px;' data-a='bs-copy-sheets'"+(k.busy?" disabled":"")+">"+(k.busy==="sheets"?"Working...":"Make a copy of all three for my branch")+"</button>"
+    +(k.msg && k.msgKey==="sheets" ? "<div style='font-size:12px;margin-bottom:8px;color:"+(k.msgOk?"#22c55e":"#f87171")+";'>"+esc(k.msg)+"</div>" : "")
+    +"<div style='font-size:11px;color:#94a3b8;margin-bottom:8px;'>Copies go in your folder from step 1. Or paste a link to a sheet you already have:</div>"
+    +BS_SHEETS.map(function(f){ return bsItemHtml("sheet", f, (d.sheets||{})[f.k]); }).join("");
+  h += "<button class='btn bp' style='width:100%;padding:13px;margin-top:14px;' data-a='bs-finish'"+(miss.length?" disabled":"")+">"+(done?"Save changes":"Finish setup")+"</button>";
+  return h;
+}
+function bsBanner(){
+  var pg = document.getElementById("pg-dashboard");
+  if(!pg || !S.branchSetup || S.branchSetup.complete || !homeIsAdmin() || pg.querySelector("#bs-banner")) return;
+  var d = document.createElement("div"); d.id = "bs-banner"; d.className = "card";
+  d.style.cssText = "margin:12px 16px;padding:14px;border:1px solid #f59e0b66;";
+  d.innerHTML = "<div style='font-weight:700;color:#f59e0b;font-size:14px;'>Finish setting up your branch</div>"
+    +"<div style='font-size:12px;color:#94a3b8;margin:4px 0 10px;'>Choose where your branch's forms, documents and sheets are saved. Until then, saving to Drive won't work.</div>"
+    +"<button class='btn bp' style='width:100%;padding:10px;' data-a='bs-open'>Start setup</button>";
+  pg.insertBefore(d, pg.firstChild);
+}
+async function bsAct(a, v){
+  if(a==="bs-open"){ S.tab="settings"; S.settingsTab="branchsetup"; render(); return; }
+  bsCapture(); var k = S._bs;
+  var dev = isDevCopy();
+  function say(key, ok, msg){ k.msgKey = key; k.msgOk = ok; k.msg = msg; k.busy = null; renderSettings(); }
+  var me = (S.currentUser&&S.currentUser.email)||"";
+  try {
+    if(a==="bs-create-folders"){
+      var parent = k.mode==="paste" ? bsExtractId(k.parent) : "";
+      if(k.mode==="paste" && !parent){ say("folders", false, "Paste the link to your folder first."); return; }
+      k.busy = "folders"; k.msg = ""; renderSettings();
+      var r = await bsBridge("createBranchFolders", {branchName:S.branchName, parentId:parent, shareWith:[me]});
+      if(r.dryRun){ r = {ok:true, root:{id:"TEST-root",name:"Fox Admin Hub - "+S.branchName,url:""}, folders:{}, notShared:[]};
+        BS_FOLDERS.forEach(function(f){ r.folders[f.k] = {id:"TEST-"+f.k, name:"(test) "+f.k, url:""}; }); }
+      if(!r.ok){ say("folders", false, r.error||"Could not create the folders."); return; }
+      await bsSave({rootFolder:r.root, folders:Object.assign({}, S.branchSetup.folders||{}, r.folders), adminEmail:S.branchSetup.adminEmail||me});
+      say("folders", true, "Folders created"+((r.notShared||[]).length?" (could not share with "+r.notShared.join(", ")+")":" and shared with you")+".");
+      return;
+    }
+    if(a==="bs-check-folder"){
+      var fid = bsExtractId((k.links||{})[v]); if(!fid){ say(v, false, "Paste a Google Drive folder link first."); return; }
+      var rf = await bsBridge("verifyFolder", {folderId:fid});
+      if(rf.dryRun) rf = {ok:true, folder:{id:fid, name:"(test) folder", url:""}};
+      if(!rf.ok){ say(v, false, rf.error); return; }
+      var fo = Object.assign({}, S.branchSetup.folders||{}); fo[v] = rf.folder; k.links[v] = "";
+      await bsSave({folders:fo, adminEmail:S.branchSetup.adminEmail||me}); say(v, true, "Connected: "+rf.folder.name); return;
+    }
+    if(a==="bs-check-sheet"){
+      var sid = bsExtractId((k.links||{})[v]); if(!sid){ say(v, false, "Paste a Google Sheets link first."); return; }
+      var rs = await bsBridge("verifySheet", {sheetId:sid, type:v});
+      if(rs.dryRun) rs = {ok:true, sheet:{id:sid, name:"(test) sheet", url:""}};
+      if(!rs.ok){ say(v, false, rs.error); return; }
+      var sh = Object.assign({}, S.branchSetup.sheets||{}); sh[v] = rs.sheet; k.links[v] = "";
+      await bsSave({sheets:sh, adminEmail:S.branchSetup.adminEmail||me}); say(v, true, "Connected: "+rs.sheet.name); return;
+    }
+    if(a==="bs-copy-sheets"){
+      var root = S.branchSetup.rootFolder && S.branchSetup.rootFolder.id;
+      if(!root){ say("sheets", false, "Create your folders in step 1 first, so the copies have somewhere to go."); return; }
+      var have = S.branchSetup.sheets||{}, which = ["order","qa","ra"].filter(function(x){ return !(have[x]&&have[x].id); });
+      if(!which.length){ say("sheets", true, "All three sheets are already connected."); return; }
+      k.busy = "sheets"; k.msg = ""; renderSettings();
+      var rc = await bsBridge("copyBranchSheets", {folderId:root, branchName:S.branchName, which:which});
+      if(rc.dryRun){ rc = {ok:true, sheets:{}, errors:[]}; which.forEach(function(x){ rc.sheets[x] = {id:"TEST-"+x, name:"(test) "+x, url:""}; }); }
+      if(!rc.ok){ say("sheets", false, rc.error||(rc.errors||[]).join(" ")||"Could not copy the sheets."); return; }
+      await bsSave({sheets:Object.assign({}, have, rc.sheets), adminEmail:S.branchSetup.adminEmail||me});
+      say("sheets", !(rc.errors||[]).length, (rc.errors||[]).length ? "Some copies failed: "+rc.errors.join(" ") : "Copies made in your folder.");
+      return;
+    }
+    if(a==="bs-finish"){
+      if(bsMissing().length){ say("finish", false, "A few items are still missing."); return; }
+      await bsSave({complete:true, completedAt:new Date().toISOString()});
+      showToast("Branch setup complete ✓"); S.tab="dashboard"; render(); return;
+    }
+  } catch(e){ say(a, false, "Something went wrong: "+e.message); }
 }
 
 // ─── Super Admin: estimate clean-up tool ─────────────────────────────────────
@@ -4906,6 +5063,11 @@ async function gs(fn, data){
         var pdfResp = await fetch(EMAIL_BRIDGE, {method:"POST", headers:{"Content-Type":"text/plain"}, body:JSON.stringify({action:"saveInspectionPdf", data:data})}).then(function(r){ return r.json(); }).catch(function(e){ return {ok:false, error:e.message}; });
         return pdfResp;
       }
+      case "setInspectionPdf": {
+        if(!data||!data.id) return {ok:false, error:"no inspection id"};
+        await fbSet("inspections", data.id, {pdfUrl:data.pdfUrl||"", pdfFileId:data.pdfFileId||""});
+        return {ok:true};
+      }
       case "logInspection": {
         var inspId = "insp_"+Date.now();
         await fbSet("inspections", inspId, Object.assign({}, data, {id:inspId, date:new Date().toISOString(), branch:data.branch||S.branch||"willamette"}));
@@ -5891,6 +6053,7 @@ function login(role){
   if(role==="manager" && S.currentUser) S.currentTech=S.currentUser.name;
   document.getElementById("login").style.display="none";
   document.getElementById("app").style.display="block";
+  bsLoad();
   syncFromSheet().then(function(){ render(); }).catch(function(){ render(); });
   // Don't call saveAccountsToSheet here - it overwrites branch accounts
   // Show welcome splash after login
@@ -6025,7 +6188,7 @@ function logout(){
   try { if(_auth && _auth.currentUser && !_auth.currentUser.isAnonymous){ reauth = _auth.signOut().then(function(){ return fbSignIn(); }).catch(function(){}); } } catch(e){}
   S._est = null; S._estView = "list";
   S.role=null; S.currentUser=null; S.checkTech=""; pin=""; loginEmail=""; loginRole="";
-  S.branch=null; S.branchName=null; S.branchChosen=false; S._saViewBranch=null;
+  S.branch=null; S.branchName=null; S.branchChosen=false; S._saViewBranch=null; S.branchSetup=null; S._bs=null;
   lsSet("hub:branch",null); lsSet("hub:branchName",null); lsSet("hub:branchChosen",false);
   document.getElementById("app").style.display="none";
   var loginDiv = document.getElementById("login");
@@ -6170,10 +6333,18 @@ async function handleAction(a,v,el,e){
     return;
   }
   if(a==="insp-view") { S.inspView=v; render(); return; }
-  if(a==="insp-start") { S.inspView="form"; S.inspStep=0; S.inspData={truck:S.trucks[0]||"",mileage:"",inspector:"",notes:"",scores:{},comments:{},photos:[],itemPhotos:{}}; render(); return; }
-  if(a==="insp-next") { S.inspStep++; render(); return; }
-  if(a==="insp-back") { if(S.inspStep===0){S.inspView="home";}else{S.inspStep--;} render(); return; }
-  if(a==="insp-save") { saveInsp(); return; }
+  if(a==="insp-start") { inspScrollTop(); S.inspView="form"; S.inspStep=0; S.inspData={truck:S.trucks[0]||"",mileage:"",inspector:"",notes:"",scores:{},comments:{},photos:[],itemPhotos:{}}; render(); return; }
+  if(a==="insp-next") {
+    var cur = S.inspStep-1, miss = (cur>=0 && cur<(S.cats||[]).length) ? inspMissingPhotos(cur) : [];
+    if(miss.length){ alert(inspPhotoBlockMessage(miss)); return; }
+    S.inspStep++; render(); inspScrollTop(); return;
+  }
+  if(a==="insp-back") { if(S.inspStep===0){S.inspView="home";}else{S.inspStep--;} render(); inspScrollTop(); return; }
+  if(a==="insp-save") {
+    var missAll = inspMissingPhotos(null);
+    if(missAll.length){ alert(inspPhotoBlockMessage(missAll)+"\n\nGo back to the section and add them."); S.inspStep = missAll[0].ci+1; render(); inspScrollTop(); return; }
+    saveInsp(); return;
+  }
   if(a==="insp-detail") { S.detailInsp=S.inspections.find(r=>r.id===v); S.inspView="detail"; render(); return; }
   if(a==="insp-del") { if(confirm("Delete this inspection?")){S.inspections=S.inspections.filter(r=>r.id!==v);save();} S.inspView="list"; render(); return; }
   if(a==="score") { const [ci,ii,n]=v.split("|"); const k=ci+":"+ii; const cur=S.inspData.scores[k]; if(cur===parseInt(n))delete S.inspData.scores[k]; else S.inspData.scores[k]=parseInt(n); render(); return; }
@@ -6435,13 +6606,15 @@ async function handleAction(a,v,el,e){
     renderSuperAdmin();
     return;
   }
+  if(a.indexOf("bs-")===0){ await bsAct(a, v); return; }
   if(a==="sa-add-branch"){
     var bName = prompt("Branch name:");
     if(!bName) return;
     var bId = bName.toLowerCase().replace(/[^a-z0-9]/g,"_");
     await initFirebase();
     await _db.collection("branches").doc(bId).set({name:bName, createdAt:new Date().toISOString()});
-    showToast(bName+" added ✓");
+    try { await _db.collection("config").doc("branchSetup_"+bId).set({complete:false, branchName:bName, createdAt:new Date().toISOString()}); } catch(e){ showToast("Branch added, but its setup record could not be created: "+e.message); }
+    showToast(bName+" added ✓ - add its main admin next");
     renderSuperAdmin();
     return;
   }
@@ -7291,7 +7464,7 @@ async function handleAction(a,v,el,e){
     showToast("Notification settings saved ✓");
     return;
   }
-  if(a==="save-cats-to-sheet") { saveAccountsToSheet().then(function(){ alert("Inspection settings synced to all devices!"); }); return; }
+  if(a==="save-cats-to-sheet") { clearTimeout(window._catAutoSave); saveAccountsToSheet().then(function(){ alert("Inspection settings saved for all devices."); }); return; }
   if(a==="assign-truck") {
     var techIdx = parseInt(v);
     var sel3 = event.target || document.querySelector("[data-a='assign-truck'][data-v='"+v+"']");
@@ -7423,8 +7596,19 @@ async function handleAction(a,v,el,e){
     var parts2=v.split("_"); var dci=parseInt(parts2[0]); var dii=parseInt(parts2[1]);
     if(confirm("Remove this item?")){
       S.cats[dci].items.splice(dii,1);
-      lsSet("hub:cats",S.cats); renderSettings();
+      inspCatsChanged(); renderSettings();
     }
+    return;
+  }
+  if(a==="cat-up"||a==="cat-down"){
+    var mc=parseInt(v), tc=a==="cat-up"?mc-1:mc+1;
+    if(S.cats[mc] && S.cats[tc]){ var tmpc=S.cats[mc]; S.cats[mc]=S.cats[tc]; S.cats[tc]=tmpc; inspCatsChanged(); renderSettings(); }
+    return;
+  }
+  if(a==="item-up"||a==="item-down"){
+    var ip=String(v).split("_"), mci=parseInt(ip[0]), mii=parseInt(ip[1]), tii=a==="item-up"?mii-1:mii+1;
+    var its=S.cats[mci]&&S.cats[mci].items;
+    if(its && its[mii] && its[tii]){ var tmpi=its[mii]; its[mii]=its[tii]; its[tii]=tmpi; inspCatsChanged(); renderSettings(); }
     return;
   }
   if(a==="add-item") {
@@ -7432,15 +7616,15 @@ async function handleAction(a,v,el,e){
     var newLabel=(document.getElementById("new-item-"+aci)||{}).value||"";
     if(!newLabel.trim()){alert("Enter an item name.");return;}
     S.cats[aci].items.push({id:"item-"+Date.now(),label:newLabel.trim(),entryType:"Score",requiresPhoto:false,maxPhotos:1});
-    lsSet("hub:cats",S.cats); renderSettings();
+    inspCatsChanged(); renderSettings();
     return;
   }
   if(a==="add-insp-field") { S.inspFields.push({id:"custom_"+Date.now(),label:"New Field",type:"text",required:false,enabled:true,placeholder:""}); save(); saveAccountsToSheet(); render(); return; }
   if(a==="del-insp-field") { var fi2=parseInt(v); if(confirm("Remove this field?")){S.inspFields.splice(fi2,1);save();saveAccountsToSheet();render();} return; }
   if(a==="insp-field-up"){ var fu=parseInt(v); if(fu>0){var tmp=S.inspFields[fu-1];S.inspFields[fu-1]=S.inspFields[fu];S.inspFields[fu]=tmp;save();saveAccountsToSheet();S.settingsTab="inspection";renderSettings();} return; }
   if(a==="insp-field-down"){ var fd2=parseInt(v); if(fd2<S.inspFields.length-1){var tmp2=S.inspFields[fd2+1];S.inspFields[fd2+1]=S.inspFields[fd2];S.inspFields[fd2]=tmp2;save();saveAccountsToSheet();S.settingsTab="inspection";renderSettings();} return; }
-  if(a==="add-cat") { var cl=prompt("Category name:"); if(!cl)return; S.cats.push({id:uid(),label:cl.trim(),scale:10,items:[]}); lsSet("hub:cats",S.cats); renderSettings(); return; }
-  if(a==="del-cat") { if(confirm("Remove category?")){S.cats.splice(parseInt(v),1);lsSet("hub:cats",S.cats);renderSettings();} return; }
+  if(a==="add-cat") { var cl=prompt("Category name:"); if(!cl)return; S.cats.push({id:uid(),label:cl.trim(),scale:10,items:[]}); inspCatsChanged(); renderSettings(); return; }
+  if(a==="del-cat") { if(confirm("Remove category?")){S.cats.splice(parseInt(v),1);inspCatsChanged();renderSettings();} return; }
   if(a==="add-cat-item") { const l=prompt("Item label:"); if(!l)return; const hc=confirm("Include comment field?"); const c=S.cats.find(x=>x.id===v); if(c){c.items.push({id:uid(),label:l.trim(),hc});save();render();} return; }
   if(a==="del-cat-item") { const [ci,ii]=v.split("|"); const c=S.cats.find(x=>x.id===ci); if(c){c.items=c.items.filter(i=>i.id!==ii);save();render();} return; }
 }
@@ -7507,7 +7691,8 @@ function render(){
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-function renderDash(){
+function renderDash(){ renderDash0(); try{ bsBanner(); }catch(e){} }
+function renderDash0(){
   var pg = document.getElementById("pg-dashboard");
   if(!pg) return;
   var name = S.managerName || S.currentTech || "";
@@ -7689,7 +7874,7 @@ function inspList(){
     <option value="all">All Trucks</option>${trucks.map(t=>`<option value="${esc(t)}"${filter===t?" selected":""}>${esc(t)}</option>`).join("")}
   </select>
   ${filtered.length===0?`<div style="text-align:center;color:#475569;padding:40px;">No records found.</div>`:
-    filtered.map(r=>`<div class="card" style="display:flex;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;" data-a="insp-detail" data-v="${r.id}">${ring(r.pct,52)}<div style="flex:1"><div style="font-weight:600;font-size:15px;">${esc(r.truck)}</div><div style="color:#475569;font-size:12px;">${fd(r.date)}${r.inspector?" - "+esc(r.inspector):""}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;"><span class="sbdg" style="background:${sc(r.pct)}22;color:${sc(r.pct)}">${sl(r.pct)}</span><button class="btn bd" style="font-size:11px;padding:3px 8px;" data-a="insp-del" data-v="${r.id}">Delete</button></div></div>`).join("")}`;
+    filtered.map(r=>`<div class="card" style="display:flex;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;" data-a="insp-detail" data-v="${r.id}">${ring(r.pct,52)}<div style="flex:1"><div style="font-weight:600;font-size:15px;">${esc(r.truck)}</div><div style="color:#475569;font-size:12px;">${fd(r.date)}${r.inspector?" - "+esc(r.inspector):""}</div></div><div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;"><span class="sbdg" style="background:${sc(r.pct)}22;color:${sc(r.pct)}">${sl(r.pct)}</span>${r.pdfUrl?`<a href="${esc(r.pdfUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:12px;font-weight:600;color:#60a5fa;text-decoration:none;padding:3px 0;">&#128196; Open PDF</a>`:""}<button class="btn bd" style="font-size:11px;padding:3px 8px;" data-a="insp-del" data-v="${r.id}">Delete</button></div></div>`).join("")}`;
 }
 
 function inspForm(){
@@ -7708,6 +7893,12 @@ function inspForm(){
       var input = "";
       if(f.id==="truck"){
         input = "<select class='inp' id='insp-field-"+f.id+"'>"+S.trucks.map(function(t){return "<option value='"+esc(t)+"'"+(inspData.truck===t?" selected":"")+">"+esc(t)+"</option>";}).join("")+"</select>";
+      } else if(f.type==="select" || f.type==="people"){
+        var optList = f.type==="people" ? inspPeopleNames() : (f.options||[]);
+        if(f.type==="people" && !val && f.id==="inspector"){ val = S.currentTech || S.managerName || ""; if(val) inspData[f.id] = val; }   // the inspector is normally whoever is signed in
+        if(val && optList.indexOf(val)<0) optList = optList.concat([val]);
+        input = "<select class='inp' id='insp-field-"+f.id+"'><option value=''>-- Select --</option>"+optList.map(function(o){ return "<option value='"+esc(o)+"'"+(val===o?" selected":"")+">"+esc(o)+"</option>"; }).join("")+"</select>"
+          +((f.type==="select" && !optList.length) ? "<div style='font-size:11px;color:#f59e0b;margin-top:4px;'>No choices have been set up for this field yet (Settings &gt; Inspection).</div>" : "");
       } else if(f.type==="textarea"){
         input = "<textarea class='inp' rows='3' id='insp-field-"+f.id+"' placeholder='"+esc(f.placeholder||"")+"'>"+esc(val)+"</textarea>";
       } else {
@@ -7723,7 +7914,7 @@ function inspForm(){
       const inputType=item.inputType||"score";
       var btns="";
       if(inputType==="score"){
-        btns=Array.from({length:cat.scale},(_,i)=>i+1).map(n=>`<button class="skb${val===n?" on":""}" style="${val===n?"background:"+sc((n/cat.scale)*100)+";border-color:"+sc((n/cat.scale)*100)+";":""}" data-a="score" data-v="${cat.id}|${item.id}|${n}">${n}</button>`).join("");
+        btns=Array.from({length:cat.scale+1},(_,i)=>i).map(n=>`<button class="skb${val===n?" on":""}" style="${val===n?"background:"+sc((n/cat.scale)*100)+";border-color:"+sc((n/cat.scale)*100)+";":""}" data-a="score" data-v="${cat.id}|${item.id}|${n}">${n}</button>`).join("");
       } else if(inputType==="check"){
         btns=`<label style="display:flex;align-items:center;gap:10px;font-size:15px;cursor:pointer;padding:4px 0;"><input type="checkbox" data-checkkey="${key}" ${inspData.comments[key]==="Done"?"checked":""} style="width:24px;height:24px;accent-color:#22c55e;"> Completed</label>`;
       } else if(inputType==="text"){
@@ -7741,8 +7932,10 @@ function inspForm(){
       // Per-item photo
       var itemPhotos2=(inspData.itemPhotos&&inspData.itemPhotos[key])||[];
       var maxP2=item.maxPhotos||1;
-      var reqP2=item.requiresPhoto||false;
-      var showPhoto2=reqP2||(item.maxPhotos&&item.maxPhotos>0);
+      var pMode=itemPhotoMode(item), minP2=itemMinPhotos(item);
+      var reqP2=pMode==="recommended"||pMode==="required";
+      var showPhoto2=pMode!=="none";
+      var needPhoto2=(pMode==="required"&&itemPhotos2.length<minP2)?"req":(pMode==="recommended"&&itemPhotos2.length===0)?"rec":"";
       var photoHTML2="";
       if(showPhoto2){
         var thumbHTML="";
@@ -7751,13 +7944,13 @@ function inspForm(){
         }
         var addBtn2="";
         if(itemPhotos2.length<maxP2){
-          addBtn2="<label style='display:inline-flex;align-items:center;gap:5px;background:#0f1f38;border:1px solid "+(reqP2&&itemPhotos2.length===0?"#f59e0b":"#1e3a5f")+";border-radius:7px;padding:5px 10px;cursor:pointer;font-size:12px;color:"+(reqP2&&itemPhotos2.length===0?"#f59e0b":"#94a3b8")+";margin-top:6px;'>"+(reqP2&&itemPhotos2.length===0?"&#x1F4F7; Recommended":"&#x1F4F7; Add Photo")+" ("+itemPhotos2.length+"/"+maxP2+")<input type='file' accept='image/*' capture='environment' style='display:none;' data-itemkey='"+key+"' onchange='captureItemPhoto(this)'></label>";
+          addBtn2="<label style='display:inline-flex;align-items:center;gap:5px;background:#0f1f38;border:1px solid "+(needPhoto2==="req"?"#ef4444":needPhoto2==="rec"?"#f59e0b":"#1e3a5f")+";border-radius:7px;padding:5px 10px;cursor:pointer;font-size:12px;color:"+(needPhoto2==="req"?"#ef4444":needPhoto2==="rec"?"#f59e0b":"#94a3b8")+";margin-top:6px;'>"+(needPhoto2==="req"?"&#x1F4F7; Photo required":needPhoto2==="rec"?"&#x1F4F7; Recommended":"&#x1F4F7; Add Photo")+" ("+itemPhotos2.length+"/"+(pMode==="required"?minP2+" needed, "+maxP2+" max":maxP2)+")<input type='file' accept='image/*' capture='environment' style='display:none;' data-itemkey='"+key+"' onchange='captureItemPhoto(this)'></label>";
         } else {
           addBtn2="<div style='font-size:12px;color:#22c55e;margin-top:6px;'>&#x2713; "+itemPhotos2.length+"/"+maxP2+" photos</div>";
         }
         photoHTML2="<div style='margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;'>"+thumbHTML+addBtn2+"</div>";
       }
-      return `<div style="background:#0a1628;border-radius:9px;padding:14px;border:1px solid #1e3a5f;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><span style="font-weight:500;font-size:14px;">${esc(item.label)}${reqP2?" &#x1F4F7;":""}</span><span style="font-family:monospace;font-size:15px;font-weight:700;color:${val===undefined?"#334155":sc((val/cat.scale)*100)}">${val===undefined?"--":val+"/"+cat.scale}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;">${btns}</div>${comment}${photoHTML2}</div>`;
+      return `<div style="background:#0a1628;border-radius:9px;padding:14px;border:1px solid #1e3a5f;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><span style="font-weight:500;font-size:14px;">${esc(item.label)}${reqP2?" &#x1F4F7;":""}${pMode==="required"?" <span style='color:#ef4444;font-size:11px;'>(photo required)</span>":""}</span><span style="font-family:monospace;font-size:15px;font-weight:700;color:${val===undefined?"#334155":sc((val/cat.scale)*100)}">${val===undefined?"--":val+"/"+cat.scale}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;">${btns}</div>${comment}${photoHTML2}</div>`;
     }).join("");
     body=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;"><h2 style="font-size:17px;font-weight:700;">${esc(cat.label)}</h2><span style="background:#0d1f3c;color:#93c5fd;padding:3px 10px;border-radius:6px;font-size:12px;">Out of ${cat.scale}</span></div><div style="display:flex;flex-direction:column;gap:14px;">${items}</div>`;
   } else {
@@ -7791,6 +7984,7 @@ function inspDetail(){
   const photos=r.photos?.length?`<div class="card" style="margin-top:8px;"><div style="font-size:11px;color:#475569;text-transform:uppercase;margin-bottom:10px;">Photos (${r.photos.length})</div><div class="g3">${r.photos.map(ph=>`<img src="${ph.data}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:7px;">`).join("")}</div></div>`:"";
   return `<div style="display:flex;gap:10px;align-items:center;margin-bottom:16px;"><button class="btn bg" data-a="insp-view" data-v="list">Back</button><button class="btn bd" data-a="insp-del" data-v="${r.id}">Delete</button></div>
     <div style="display:flex;gap:14px;align-items:center;margin-bottom:20px;">${ring(r.pct,72)}<div><h2 style="font-size:20px;font-weight:700;">${esc(r.truck)}</h2><div style="color:#475569;font-size:13px;margin-top:3px;">${fd(r.date)}${r.inspector?" - "+esc(r.inspector):""}</div>${r.mileage?`<div style="color:#64748b;font-size:12px;margin-top:2px;">${Number(r.mileage).toLocaleString()} miles</div>`:""}</div></div>
+    ${r.pdfUrl?`<a href="${esc(r.pdfUrl)}" target="_blank" rel="noopener" class="btn bp" style="display:block;text-align:center;text-decoration:none;margin-bottom:12px;">&#128196; Open PDF</a>`:""}
     ${(S.inspFields||[]).filter(f=>["truck","mileage","inspector","notes"].indexOf(f.id)<0&&r[f.id]).map(f=>`<div class="card" style="margin-bottom:8px;padding:10px 14px;"><div style="font-size:11px;color:#475569;text-transform:uppercase;margin-bottom:3px;">${esc(f.label)}</div><div style="font-size:13px;color:#cbd5e1;">${esc(String(r[f.id]))}</div></div>`).join("")}
     ${r.notes?`<div class="card" style="margin-bottom:12px;"><div style="font-size:11px;color:#475569;text-transform:uppercase;margin-bottom:5px;">Notes</div><p style="font-size:13px;color:#cbd5e1;">${esc(r.notes)}</p></div>`:""}
     ${cats}${photos}`;
@@ -7832,6 +8026,61 @@ function inspEmailSelected(){
   var c = inspEmailChoices();
   if(!Array.isArray(S.inspData.notifyTo)) S.inspData.notifyTo = c.def.slice();
   return S.inspData.notifyTo;
+}
+
+// small up/down arrows used to reorder categories and items in Settings
+function inspArrows(act, v, canUp, canDown){
+  var st = "background:transparent;border:none;color:#64748b;cursor:pointer;font-size:13px;padding:0 5px;line-height:1.1;";
+  return "<div style='display:flex;flex-direction:column;'>"
+    +(canUp ? "<button style='"+st+"' data-a='"+act+"-up' data-v='"+v+"' title='Move up'>&#9650;</button>" : "<span style='height:15px;'></span>")
+    +(canDown ? "<button style='"+st+"' data-a='"+act+"-down' data-v='"+v+"' title='Move down'>&#9660;</button>" : "<span style='height:15px;'></span>")
+    +"</div>";
+}
+
+// Inspection settings are saved to the database a moment after every change (no need to remember the Sync button)
+function inspCatsChanged(){
+  lsSet("hub:cats", S.cats);
+  clearTimeout(window._catAutoSave);
+  window._catAutoSave = setTimeout(async function(){
+    try { await saveAccountsToSheet(); showToast("Inspection settings saved"); } catch(e){ console.warn("Auto-save of inspection settings failed:", e); }
+  }, 1200);
+}
+
+// Everyone in the system (managers and technicians), for fields set to "pick from people"
+function inspPeopleNames(){
+  var seen = {}, out = [];
+  (S.managers||[]).concat(S.techAccounts||[]).forEach(function(p){ var n = String((p&&p.name)||"").trim(); if(n && !seen[n.toLowerCase()]){ seen[n.toLowerCase()] = 1; out.push(n); } });
+  return out.sort(function(a,b){ return a.localeCompare(b); });
+}
+
+// ── Photo rules for inspection items: none / allowed / recommended / required ──
+function itemPhotoMode(it){
+  if(it.photoMode) return it.photoMode;
+  if(it.requiresPhoto) return "recommended";              // older items: the box meant "recommended"
+  if(it.maxPhotos && it.maxPhotos>0) return "allowed";
+  return "none";
+}
+function itemMinPhotos(it){ return itemPhotoMode(it)==="required" ? Math.max(1, Math.min(parseInt(it.minPhotos)||1, parseInt(it.maxPhotos)||1)) : 0; }
+// items (in one category, or in all when catIdx is null) that still need required photos
+function inspMissingPhotos(catIdx){
+  var out = [];
+  (S.cats||[]).forEach(function(c, ci){
+    if(catIdx!==null && catIdx!==ci) return;
+    (c.items||[]).forEach(function(it){
+      var need = itemMinPhotos(it); if(!need || (it.inputType||"score")==="none") return;
+      var have = ((S.inspData.itemPhotos||{})[c.id+":"+it.id]||[]).length;
+      if(have<need) out.push({ci:ci, cat:c.label, label:it.label, need:need, have:have});
+    });
+  });
+  return out;
+}
+function inspPhotoBlockMessage(list){
+  return "Photos are required before you can continue:\n\n"+list.map(function(m){ return "- "+m.label+" ("+m.have+" of "+m.need+")"; }).join("\n");
+}
+
+// each section of the inspection form starts at the top of the page
+function inspScrollTop(){
+  try { window.scrollTo(0,0); document.documentElement.scrollTop=0; document.body.scrollTop=0; var w=document.getElementById("wrap"); if(w) w.scrollTop=0; var pgI=document.getElementById("pg-inspect"); if(pgI) pgI.scrollTop=0; } catch(e){}
 }
 
 function calcPct(){
@@ -7879,28 +8128,39 @@ async function saveInsp(){
   const row=[new Date(rec.date).toLocaleDateString("en-US"),rec.truck,rec.inspector||"",rec.mileage||"",pct,...catS];
 
   // Save inspection to Firebase with branch tag
+  var inspDbId = "";
   try {
-    await gs("logInspection", Object.assign({}, rec, {branch:S.branch||"willamette"}));
+    var dbRec = Object.assign({}, rec, {branch:S.branch||"willamette"});
+    // The database holds about 1 MB per record: if the photos would not fit, keep them in the PDF only
+    if(JSON.stringify(dbRec).length > 900000){ delete dbRec.itemPhotos; delete dbRec.photos; dbRec.photosInPdfOnly = true; }
+    var logRes = await gs("logInspection", dbRec);
+    inspDbId = (logRes && logRes.id) || "";
   } catch(e){ console.warn("Firebase inspection save:", e); }
 
   // Generate a PDF of the inspection, save it to Drive, and email the managers a link
-  var pdfUrl = "", pdfOk = false;
+  var pdfUrl = "", pdfOk = false, pdfErr = "";
   try {
     var pdfData = buildInspectionPdfData(rec);
     var pdfRes = await gs("saveInspectionPdfServer", pdfData);
-    if(pdfRes && pdfRes.ok){ pdfOk = true; pdfUrl = pdfRes.url || ""; }
-    else console.warn("Inspection PDF not saved:", pdfRes && pdfRes.error);
-  } catch(e){ console.warn("PDF build/save failed:", e); }
+    if(pdfRes && pdfRes.ok){
+      pdfOk = true; pdfUrl = pdfRes.url || "";
+      if(pdfUrl){
+        rec.pdfUrl = pdfUrl; rec.pdfFileId = pdfRes.fileId || ""; save();   // so the Records list can open it
+        if(inspDbId){ try { await gs("setInspectionPdf", {id:inspDbId, pdfUrl:pdfUrl, pdfFileId:rec.pdfFileId}); } catch(e){ console.warn("Could not attach the PDF link:", e); } }
+      }
+    }
+    else { pdfErr = (pdfRes && pdfRes.error) || "no answer from the Google script"; console.warn("Inspection PDF not saved:", pdfErr); }
+  } catch(e){ pdfErr = e.message; console.warn("PDF build/save failed:", e); }
   try {
     var toI = notifyTo.join(",");
     if(toI){
       var bodyI = "A fleet inspection was submitted.\n\nTruck: "+(rec.truck||"")+"\nInspector: "+(rec.inspector||S.currentTech||S.managerName||"")+"\nMileage: "+(rec.mileage||"-")+"\nOverall score: "+pct+"%\n"
         +(rec.notes ? "\nNotes: "+rec.notes+"\n" : "")
-        +(pdfUrl ? "\nPDF: "+pdfUrl+"\n" : "\n(The PDF could not be saved this time. The inspection itself is saved in the app.)\n");
+        +(pdfUrl ? "\nPDF: "+pdfUrl+"\n" : pdfOk ? "\n(This is the test copy, so no PDF was filed to Drive.)\n" : "\n(The PDF could not be saved: "+pdfErr+". The inspection itself is saved in the app.)\n");
       await sendEmail(toI, "[Fox Pest Control] Fleet Inspection: "+(rec.truck||"")+" ("+pct+"%)", bodyI);
     }
   } catch(e){ console.warn("Inspection email failed:", e); }
-  showToast((pdfOk ? "Inspection saved. PDF filed" : "Inspection saved. The PDF could not be filed - see a manager") + (pdfOk ? (notifyTo.length ? " and emailed." : ", no email sent.") : "."));
+  showToast((pdfOk ? (pdfUrl ? "Inspection saved. PDF filed" : "Inspection saved. Test copy: PDF not filed") : "Inspection saved. The PDF could not be filed ("+pdfErr+")") + (notifyTo.length ? ", managers emailed." : ", no email sent."));
 }
 
 function buildInspectionPdfData(rec){
@@ -7913,7 +8173,7 @@ function buildInspectionPdfData(rec){
     +".header{display:flex;justify-content:space-between;border-bottom:2px solid #000;padding-bottom:10px;margin-bottom:16px;}"
     +".meta{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:14px;font-size:12px;}"
     +".meta-item{padding:4px 0;}.meta-label{color:#666;font-size:11px;}"
-    +".score-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #eee;}"
+    +".score-row{border-bottom:1px solid #eee;padding:5px 0;}.score-row td{padding:5px 0;}"
     +".score-val{font-weight:bold;min-width:60px;text-align:right;}"
     +".cat-score{color:#666;font-size:11px;}"
     +".overall{background:#f5f5f5;padding:10px;border-radius:4px;text-align:center;margin-bottom:14px;}"
@@ -7932,23 +8192,39 @@ function buildInspectionPdfData(rec){
     +"</div></div>"
     +"<div class='overall'><div class='overall-pct'>"+(rec.pct!==undefined?rec.pct:calcPct())+"%</div><div style='color:#666;'>Overall Score</div></div>";
 
+  var totE = 0, totP = 0;
   S.cats.forEach(function(c){
-    html += "<h2>"+esc(c.label)+"</h2>";
+    var catE = 0, catP = 0, rowsHtml = "";
     c.items.forEach(function(item){
       var key = c.id+":"+item.id;
-      var score = rec.scores&&rec.scores[key]!==undefined ? rec.scores[key] : "—";
+      var hasScore = rec.scores && rec.scores[key]!==undefined;
+      var score = hasScore ? rec.scores[key] : null;
       var comment = rec.comments&&rec.comments[key] ? rec.comments[key] : "";
       var itype = item.inputType||"score";
+      var right = "";
       if(itype==="score"){
-        html += "<div class='score-row'><span>"+esc(item.label)+"</span>"
-          +"<span class='score-val'> - "+score+" <span class='cat-score'>/ "+c.scale+"</span></span></div>";
-        if(comment) html += "<div class='comment'>"+esc(comment)+"</div>";
-      } else if(itype!=="none"){
-        var shown = itype==="check" ? (comment==="Done" ? "Done" : "Not done") : itype==="number" ? (score==="—" ? "—" : score) : (comment||"—");
-        html += "<div class='score-row'><span>"+esc(item.label)+"</span><span class='score-val'> - "+esc(String(shown))+"</span></div>";
+        catP += c.scale; if(hasScore) catE += score;
+        right = hasScore ? score+" / "+c.scale : "not scored";
+      } else if(itype==="none"){
+        // "No Entry" items (photo-only items, such as the four corners of the truck) still print their name and photos
+        if(!(rec.itemPhotos && rec.itemPhotos[key] && rec.itemPhotos[key].length)) return;
+        right = "";
       }
+      else if(itype==="check"){ right = comment==="Done" ? "Done" : "Not done"; comment = ""; }
+      else if(itype==="number"){ right = hasScore ? String(score) : "\u2014"; }
+      else { right = comment || "\u2014"; comment = ""; }
+      rowsHtml += "<table class='score-row' width='100%' cellpadding='0' cellspacing='0'><tr><td>"+esc(item.label)+"</td><td align='right' class='score-val'>"+esc(String(right))+"</td></tr></table>";
+      if(comment) rowsHtml += "<div class='comment'>"+esc(comment)+"</div>";
+      var ph = rec.itemPhotos && rec.itemPhotos[key];
+      if(ph && ph.length) rowsHtml += "<div class='photos'>"+ph.map(function(src){ return "<img src='"+src+"' width='170' style='margin:4px 6px 4px 0;border:1px solid #ccc;'>"; }).join("")+"</div>";
     });
+    totE += catE; totP += catP;
+    html += "<h2>"+esc(c.label)+(catP ? " <span style='font-weight:normal;color:#444;'>("+catE+" / "+catP+" points)</span>" : "")+"</h2>"+rowsHtml;
   });
+  html = html.replace("Overall Score</div>", "Overall Score</div><div style='color:#444;margin-top:2px;'>"+totE+" / "+totP+" points</div>");
+  if(rec.photos && rec.photos.length){
+    html += "<h2>Additional Photos</h2><div class='photos'>"+rec.photos.map(function(ph){ return "<img src='"+(ph.data||"")+"' width='230' style='margin:4px 6px 4px 0;border:1px solid #ccc;'>"; }).join("")+"</div>";
+  }
 
   if(rec.notes){
     html += "<h2>Additional Notes</h2><p style='font-size:12px;'>"+esc(rec.notes)+"</p>";
@@ -10605,6 +10881,7 @@ function renderSettings(){
     {id:"notifications",l:"Notifications"}
   ];
   if(homeCanEdit()) tabs.push({id:"homescreen",l:"Home Screen"});
+  if(bsCanSetup()) tabs.push({id:"branchsetup",l:"Branch Setup"});
 
   const tabBar = "<div style='display:flex;gap:6px;margin-bottom:16px;overflow-x:auto;padding-bottom:4px;'>"
     +tabs.map(function(t){
@@ -10768,7 +11045,7 @@ function renderSettings(){
       +"<button class='btn bp' data-a='save-notif-config' style='width:100%;padding:12px;margin-top:8px;'>💾 Save Notification Settings</button>";
 
   } else if(tab==="inspection"){
-    var syncBtn = "<button class='btn bp' style='width:100%;padding:10px;margin-bottom:14px;' data-a='save-cats-to-sheet'>&#x1F4BE; Sync Inspection Settings to All Devices</button>";
+    var syncBtn = "<button class='btn bp' style='width:100%;padding:10px;margin-bottom:14px;' data-a='save-cats-to-sheet'>&#x1F4BE; Save Inspection Settings Now (changes also save by themselves)</button>";
 
     var _tally = inspTallyData();
     var catRows = (S.cats||[]).map(function(c,ci){
@@ -10778,23 +11055,25 @@ function renderSettings(){
         }).join("");
         return "<div style='margin-bottom:8px;padding-left:12px;border-left:2px solid #1e3a5f;'>"
           +"<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px;'>"
+          +inspArrows("item", ci+"_"+ii, ii>0, ii<(c.items||[]).length-1)
           +"<input class='inp' style='flex:1;padding:5px 8px;font-size:12px;' value='"+esc(it.label)+"' data-ci='"+ci+"' data-ii='"+ii+"' data-field='itemlabel'>"
           +"<select class='inp' style='width:90px;padding:5px;font-size:11px;' data-ci='"+ci+"' data-ii='"+ii+"' data-field='entryType'>"+typeOpts+"</select>"
           +"<button class='btn bd' style='padding:4px 8px;font-size:11px;' data-a='del-item' data-v='"+ci+"_"+ii+"'>X</button>"
           +"</div>"
-          +"<div style='display:flex;align-items:center;gap:10px;padding:4px 0;'>"
-          +"<label style='display:flex;align-items:center;gap:5px;font-size:12px;color:#94a3b8;cursor:pointer;'>"
-          +"<input type='checkbox' "+(it.requiresPhoto?"checked":"")+" data-ci='"+ci+"' data-ii='"+ii+"' data-field='requiresPhoto' style='width:14px;height:14px;accent-color:#2563eb;'>"
-          +"&#x1F4F7; Photo</label>"
-          +"<label style='display:flex;align-items:center;gap:5px;font-size:12px;color:#94a3b8;'>Max: "
-          +"<input type='number' class='inp' style='width:50px;padding:3px 6px;font-size:12px;' value='"+(it.maxPhotos||1)+"' min='1' max='10' data-ci='"+ci+"' data-ii='"+ii+"' data-field='maxPhotos'>"
-          +"</label></div>"
-          +(it.entryType==="Select"?"<div style='margin-top:4px;'><div style='font-size:11px;color:#94a3b8;margin-bottom:3px;'>Choices the tech can pick from (type one per line):</div><textarea class='inp' style='font-size:12px;padding:6px;width:100%;height:90px;' data-ci='"+ci+"' data-ii='"+ii+"' data-field='selectOptions' placeholder='Good&#10;Needs service&#10;N/A'>"+esc((it.selectOptions||[]).join("\n"))+"</textarea></div>":"")
+          +"<div style='display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:4px 0;font-size:12px;color:#94a3b8;'>"
+          +"&#x1F4F7; <select class='inp' style='width:auto;padding:3px 6px;font-size:12px;' data-ci='"+ci+"' data-ii='"+ii+"' data-field='photoMode'>"
+          +[["none","No photos"],["allowed","Photos allowed"],["recommended","Photo recommended"],["required","Photo required"]].map(function(o){ return "<option value='"+o[0]+"'"+(itemPhotoMode(it)===o[0]?" selected":"")+">"+o[1]+"</option>"; }).join("")
+          +"</select>"
+          +(itemPhotoMode(it)!=="none" ? "<label style='display:flex;align-items:center;gap:5px;'>Max: <input type='number' class='inp' style='width:50px;padding:3px 6px;font-size:12px;' value='"+(it.maxPhotos||1)+"' min='1' max='10' data-ci='"+ci+"' data-ii='"+ii+"' data-field='maxPhotos'></label>" : "")
+          +(itemPhotoMode(it)==="required" ? "<label style='display:flex;align-items:center;gap:5px;'>Needed: <input type='number' class='inp' style='width:50px;padding:3px 6px;font-size:12px;' value='"+itemMinPhotos(it)+"' min='1' max='10' data-ci='"+ci+"' data-ii='"+ii+"' data-field='minPhotos'></label>" : "")
+          +"</div>"
+          +(it.entryType==="Select"?"<div style='margin-top:4px;'><div style='font-size:11px;color:#94a3b8;margin-bottom:3px;'>Choices the inspector can pick from (type one per line):</div><textarea class='inp' style='font-size:12px;padding:6px;width:100%;height:90px;' data-ci='"+ci+"' data-ii='"+ii+"' data-field='selectOptions' placeholder='Good&#10;Needs service&#10;N/A'>"+esc((it.selectOptions||[]).join("\n"))+"</textarea></div>":"")
           +"</div>";
       }).join("");
 
       return "<div class='card' style='margin-bottom:10px;'>"
         +"<div style='display:flex;align-items:center;gap:8px;margin-bottom:10px;'>"
+        +inspArrows("cat", ci, ci>0, ci<(S.cats||[]).length-1)
         +"<input class='inp' style='flex:1;padding:6px 8px;font-size:13px;' value='"+esc(c.label)+"' data-ci='"+ci+"' data-field='label'>"
         +"<input type='number' min='1' class='inp' style='width:60px;padding:6px 8px;font-size:13px;' value='"+(c.scale||10)+"' data-ci='"+ci+"' data-field='scale' title='Points each scored item in this category is worth'>"
         +"<span style='font-size:11px;color:#94a3b8;line-height:1.1;'>points<br>each item</span>"
@@ -10818,9 +11097,13 @@ function renderSettings(){
         +"</div>"
         +"<div style='flex:1;'>"
         +"<input class='inp' style='font-size:12px;padding:5px 8px;margin-bottom:4px;' data-insp-fi='"+fi+"' data-insp-field='label' value='"+esc(f.label)+"' placeholder='Field label'>"
-        +"<select class='inp' style='font-size:11px;padding:4px;' data-insp-fi='"+fi+"' data-insp-field='type'>"
-        +["text","number","textarea","select"].map(function(t){ return "<option value='"+t+"'"+(f.type===t?" selected":"")+">"+t+"</option>"; }).join("")
-        +"</select>"
+        +(f.id==="truck"
+          ? "<div style='font-size:11px;color:#94a3b8;line-height:1.4;'>Vehicle list: always shows the trucks you have set up, so there is nothing to choose here.</div>"
+          : "<select class='inp' style='font-size:11px;padding:4px;' data-insp-fi='"+fi+"' data-insp-field='type'>"
+            +[["text","Short text"],["number","Number"],["textarea","Long text (notes)"],["select","Pick from my own list"],["people","Pick from people in the system"]].map(function(t){ return "<option value='"+t[0]+"'"+(f.type===t[0]?" selected":"")+">"+t[1]+"</option>"; }).join("")
+            +"</select>"
+            +(f.type==="select" ? "<div style='font-size:11px;color:#94a3b8;margin:6px 0 3px;'>Choices (type one per line):</div><textarea class='inp' style='font-size:12px;padding:6px;width:100%;height:80px;' data-insp-fi='"+fi+"' data-insp-field='optionsText' placeholder='Choice one&#10;Choice two'>"+esc((f.options||[]).join("\n"))+"</textarea>" : "")
+            +(f.type==="people" ? "<div style='font-size:11px;color:#94a3b8;margin-top:5px;line-height:1.4;'>Lists every manager and technician in the system"+(f.id==="inspector"?", and starts on whoever is signed in":"")+".</div>" : ""))
         +"</div>"
         +"<label style='display:flex;align-items:center;gap:4px;font-size:11px;color:#94a3b8;'>"
         +"<input type='checkbox' "+(f.required?"checked":"")+" data-insp-fi='"+fi+"' data-insp-field='required'> Required"
@@ -10840,11 +11123,12 @@ function renderSettings(){
       +"<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin-bottom:8px;'>Inspection Categories</div>"
       +"<div id='insp-tally' class='card' style='margin-bottom:10px;padding:12px 14px;'>"+inspTallyHtml(_tally)+"</div>"
       +"<div style='font-size:12px;color:#94a3b8;line-height:1.6;margin-bottom:12px;'><b style='color:#e2e8f0;'>Item types.</b> Only <b>Score</b> items earn points.<br>"
-      +"<b>Score</b> - tech taps a number from 1 to the category's points.<br><b>Checkbox</b> - tech just checks \"Completed\". No points.<br><b>Text</b> / <b>Textarea</b> - a typed answer or notes. No points.<br><b>Number</b> - tech types a number, such as mileage. No points.<br><b>Select</b> - tech picks one answer from a list you type below the item, one option per line. No points.<br><b>No Entry</b> - the item is hidden from the form.</div>"
+      +"<b>Score</b> - the inspector taps a number from 0 to the category's points.<br><b>Checkbox</b> - the inspector just checks \"Completed\". No points.<br><b>Text</b> / <b>Textarea</b> - a typed answer or notes. No points.<br><b>Number</b> - the inspector types a number, such as mileage. No points.<br><b>Select</b> - the inspector picks one answer from a list you type below the item, one option per line. No points.<br><b>No Entry</b> - the item is hidden from the form.</div>"
       +catRows
       +"<button class='btn bp' data-a='add-cat' style='width:100%;padding:10px;margin-top:8px;'>+ Add Category</button>";
   }
 
+  if(tab==="branchsetup") body = bsHtml();
   pg.innerHTML = "<h2 style='font-size:20px;font-weight:700;margin-bottom:12px;'>Settings</h2>"
     +superAdminBar+tabBar+body;
 
@@ -10873,14 +11157,16 @@ function renderSettings(){
   });
   // Wire up inspection field changes
   if(S.settingsTab==="inspection"){
-    pg.querySelectorAll("input[data-insp-fi], select[data-insp-fi]").forEach(function(inp){
+    pg.querySelectorAll("input[data-insp-fi], select[data-insp-fi], textarea[data-insp-fi]").forEach(function(inp){
       inp.addEventListener("change", function(){
         var fi = parseInt(inp.getAttribute("data-insp-fi"));
         var field = inp.getAttribute("data-insp-field");
         if(!S.inspFields[fi]) return;
         if(field==="required"||field==="enabled") S.inspFields[fi][field] = inp.checked;
+        else if(field==="optionsText") S.inspFields[fi].options = inp.value.split("\n").map(function(x){ return x.trim(); }).filter(Boolean);
         else S.inspFields[fi][field] = inp.value;
         save(); saveAccountsToSheet();
+        if(field==="type") renderSettings();   // show or hide the choices box
       });
     });
   }
@@ -10913,8 +11199,10 @@ function renderSettings(){
         if(!S.cats[ci]) return;
         if(ii>=0){
           if(!S.cats[ci].items[ii]) return;
-          if(field==="requiresPhoto") S.cats[ci].items[ii].requiresPhoto = el.checked;
-          else if(field==="maxPhotos") S.cats[ci].items[ii].maxPhotos = parseInt(el.value)||1;
+          if(field==="photoMode"){ var itm=S.cats[ci].items[ii]; itm.photoMode = el.value; itm.requiresPhoto = (el.value==="recommended"||el.value==="required"); if(el.value!=="none" && !itm.maxPhotos) itm.maxPhotos = 1; if(el.value==="none") itm.maxPhotos = 0; }
+          else if(field==="requiresPhoto") S.cats[ci].items[ii].requiresPhoto = el.checked;
+          else if(field==="minPhotos"){ var it2=S.cats[ci].items[ii]; it2.minPhotos = Math.max(1, parseInt(el.value)||1); if((it2.maxPhotos||1)<it2.minPhotos) it2.maxPhotos = it2.minPhotos; }
+          else if(field==="maxPhotos"){ var it3=S.cats[ci].items[ii]; it3.maxPhotos = Math.max(1, parseInt(el.value)||1); if(it3.minPhotos && it3.minPhotos>it3.maxPhotos) it3.minPhotos = it3.maxPhotos; }
           else if(field==="itemlabel") S.cats[ci].items[ii].label = el.value;
           else if(field==="entryType"){ S.cats[ci].items[ii].entryType = el.value; S.cats[ci].items[ii].inputType = ({"Score":"score","Checkbox":"check","Text":"text","Textarea":"textarea","Number":"number","Select":"select","No Entry":"none"})[el.value]||"score"; }
           else if(field==="selectOptions") S.cats[ci].items[ii].selectOptions = el.value.split("\n").filter(Boolean);
@@ -10922,9 +11210,9 @@ function renderSettings(){
           if(field==="label") S.cats[ci].label = el.value;
           else if(field==="scale") S.cats[ci].scale = parseInt(el.value)||10;
         }
-        lsSet("hub:cats", S.cats);
+        inspCatsChanged();
         if(field==="scale" || field==="entryType") inspTallyRefresh();
-        if(field==="entryType") renderSettings();   // show or hide the choices box for Select items
+        if(field==="entryType" || field==="photoMode" || field==="minPhotos" || field==="maxPhotos") renderSettings();   // show or hide the choices / photo boxes
       });
     });
   }, 50);
