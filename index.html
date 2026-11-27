@@ -386,7 +386,7 @@ const S = {
 function lsGet(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch{return null;}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
 function save(){["managers","techAccounts","managerName","trucks","techs","techEmails","cats","inspFields","inspections","products","checkouts","orders","truckInventories","restockOrders"].forEach(k=>lsSet("hub:"+k,S[k]));}
-function selectBranch(branchId){
+function selectBranch(branchId, branchNameArg){
   // Clear all cached data when selecting a branch
   S.managers=[]; S.techAccounts=[]; S.orders=[]; S.signRequests=[];
   S._oooForms=null; S.products=[]; S.trucks=[]; S.cats=[]; S.inspFields=[];
@@ -397,7 +397,7 @@ function selectBranch(branchId){
   lsSet("hub:trucks",null); lsSet("hub:cats",null);
   lsSet("hub:notifConfig",null);
   S.branch = branchId;
-  S.branchName = BRANCHES[branchId] ? BRANCHES[branchId].name : "Willamette Valley";
+  S.branchName = BRANCHES[branchId] ? BRANCHES[branchId].name : (branchNameArg || (S._saViewBranch && S._saViewBranch.id===branchId && S._saViewBranch.name) || branchId);   // a branch added in the app is not in BRANCHES: use its own name, never Willamette
   S.branchChosen = true;
   lsSet("hub:branch", branchId);
   lsSet("hub:branchName", S.branchName);
@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.0";
+const APP_VERSION = "6.15.1";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
