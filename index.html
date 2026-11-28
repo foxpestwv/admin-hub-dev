@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.8";
+const APP_VERSION = "6.15.9";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -5705,6 +5705,10 @@ async function loadAccountsFromSheet(){
     if(result){
       var mgrs = fbParseArray(result.managers);
       if(mgrs.length){ S.managers = mgrs; lsSet("hub:managers", S.managers); }
+      else if(!BRANCHES[currentBranch] || (S.managers||[]).every(function(m){ return m.id==="mgr1" && m.tempPin==="1234"; })){
+        // A branch with no managers yet must not inherit the built-in placeholder login (John Kluttz, PIN 1234)
+        S.managers = []; lsSet("hub:managers", S.managers);
+      }
 
       var techs = fbParseArray(result.techAccounts);
       if(techs.length){ S.techAccounts = techs; lsSet("hub:techAccounts", S.techAccounts); }
@@ -5946,7 +5950,7 @@ async function checkEmail(){
   var isTech = S.techAccounts.find(function(t){ return t.email.toLowerCase()===email; });
   
   if(!isMgr && !isTech){
-    if(err) err.textContent="Email not found. Please check and try again.";
+    if(err) err.textContent = (S.managers||[]).length ? "Email not found. Please check and try again." : "This branch has no accounts yet. Ask the Super Admin to add its first manager.";
     return;
   }
   
