@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.9";
+const APP_VERSION = "6.15.10";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -6651,9 +6651,14 @@ async function handleAction(a,v,el,e){
   }
   if(a==="sa-delete-branch"){
     var dParts = v.split("|");
-    if(!confirm("Delete branch "+dParts[1]+"? This cannot be undone.")) return;
+    if(!confirm("Delete branch "+dParts[1]+"? This also removes its manager and technician accounts and its setup choices. This cannot be undone.")) return;
     await initFirebase();
     await _db.collection("branches").doc(dParts[0]).delete();
+    if(!BRANCHES[dParts[0]]){   // a branch added in the app: clear what it left behind, so a new branch with the same name starts clean
+      var leftovers = ["accounts_"+dParts[0], "branchSetup_"+dParts[0]];
+      for(var li=0; li<leftovers.length; li++){ try { await _db.collection("config").doc(leftovers[li]).delete(); } catch(x){ console.warn("Could not remove "+leftovers[li]+": "+x.message); } }
+      try { var sfd = {}; sfd[dParts[0]] = firebase.firestore.FieldValue.delete(); await _db.collection("config").doc("security").set({branches:sfd}, {merge:true}); _secureFlags = null; } catch(x){}
+    }
     showToast(dParts[1]+" deleted");
     renderSuperAdmin();
     return;
