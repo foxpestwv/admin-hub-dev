@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.5";
+const APP_VERSION = "6.15.7";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -2444,15 +2444,17 @@ function bsHtml(){
     +"<div style='font-size:12px;color:#94a3b8;line-height:1.5;margin-bottom:12px;'>Choose where "+esc(S.branchName||"your branch")+" keeps its files and sheets. Your answers save as you go, so you can finish later.</div>"
     +"<div class='card' style='margin-bottom:12px;padding:12px 14px;border:1px solid "+(miss.length?"#f59e0b55":"#22c55e55")+";'><div style='font-size:13px;font-weight:700;color:"+(miss.length?"#f59e0b":"#22c55e")+";'>"
     +(miss.length ? (8-miss.length)+" of 8 done" : (done ? "✓ Setup complete" : "All 8 done - ready to finish"))+"</div></div>";
+  if(!S._bsBridgeEmail && !S._bsBridgeAsked){ S._bsBridgeAsked = true; bsBridge("whoami", {}).then(function(r){ S._bsBridgeEmail = (r && r.ok && r.email) || "(ask the person who runs the app)"; if(S.settingsTab==="branchsetup"){ bsCapture(); renderSettings(); } }).catch(function(){ S._bsBridgeEmail = "(ask the person who runs the app)"; }); }
+  var bre = S._bsBridgeEmail || "...";
   h += "<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin:4px 0 8px;'>1. Your folders</div>"
     +"<div class='card' style='margin-bottom:8px;padding:12px 14px;'>"
-    +"<label style='display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px;'><input type='radio' name='bsmode' value='auto' "+(k.mode!=="paste"?"checked":"")+"> <span>Create the folders for me<br><span style='font-size:11px;color:#94a3b8;'>Makes a \"Fox Admin Hub - "+esc(S.branchName||"Branch")+"\" folder with a folder for each kind of file, and shares it with "+esc(me)+".</span></span></label>"
-    +"<label style='display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px;'><input type='radio' name='bsmode' value='paste' "+(k.mode==="paste"?"checked":"")+"> <span>Create them inside a folder I already have<br><span style='font-size:11px;color:#94a3b8;'>Paste its link. It must be shared with the app's Google account as an Editor.</span></span></label>"
+    +"<label style='display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px;'><input type='radio' name='bsmode' value='auto' "+(k.mode!=="paste"?"checked":"")+"> <span>Create the folders for me<br><span style='font-size:11px;color:#94a3b8;'>Makes a \"Fox Admin Hub - "+esc(S.branchName||"Branch")+"\" folder with a folder for each kind of file, and shares it with "+esc(me)+". It shows up under \"Shared with me\" in Google Drive.</span></span></label>"
+    +"<label style='display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px;'><input type='radio' name='bsmode' value='paste' "+(k.mode==="paste"?"checked":"")+"> <span>Create them inside a folder I already have<br><span style='font-size:11px;color:#94a3b8;'>Share your folder with <b style='color:#f59e0b;user-select:all;'>"+esc(bre)+"</b> as an Editor, then paste its link.</span></span></label>"
     +(k.mode==="paste" ? "<input class='inp' id='bs-parent' style='width:100%;font-size:12px;padding:7px;margin-bottom:8px;' placeholder='Paste a Google Drive folder link' value='"+esc(k.parent||"")+"'>" : "")
-    +"<button class='btn bp' style='width:100%;padding:10px;' data-a='bs-create-folders'"+(k.busy?" disabled":"")+">"+(k.busy==="folders"?"Working...":"Create my folders")+"</button>"
-    +(k.msg && k.msgKey==="folders" ? "<div style='font-size:12px;margin-top:6px;color:"+(k.msgOk?"#22c55e":"#f87171")+";'>"+esc(k.msg)+"</div>" : "")
+    +"<button class='btn bp' style='width:100%;padding:10px;' data-a='bs-create-folders'"+(k.busy?" disabled":"")+">"+(k.busy==="folders"?"Working...":"Set up my folders")+"</button>"
+    +(k.msg && k.msgKey==="folders" ? "<div style='font-size:12px;margin-top:6px;color:"+(k.msgOk?"#22c55e":"#f87171")+";line-height:1.4;'>"+esc(k.msg)+"</div>" : "")
     +"</div>"
-    +"<div style='font-size:12px;color:#94a3b8;margin:10px 0 8px;'>Or point each one at a folder you already use:</div>"
+    +"<div style='font-size:12px;color:#94a3b8;margin:10px 0 8px;'>Or point any one of them at a different folder you already use:</div>"
     +BS_FOLDERS.map(function(f){ return bsItemHtml("folder", f, (d.folders||{})[f.k]); }).join("");
   h += "<div style='font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;margin:16px 0 8px;'>2. Your sheets</div>"
     +"<button class='btn bp' style='width:100%;padding:10px;margin-bottom:8px;' data-a='bs-copy-sheets'"+(k.busy?" disabled":"")+">"+(k.busy==="sheets"?"Working...":"Make a copy of all three for my branch")+"</button>"
