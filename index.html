@@ -466,7 +466,7 @@ function load(){
 }
 
 // ─── App Version ─────────────────────────────────────────────────────────────
-const APP_VERSION = "6.15.7";
+const APP_VERSION = "6.15.8";
 
 function normProdName(s){ return String(s||"").replace(/\s+/g," ").trim().toLowerCase(); }
 
@@ -5206,8 +5206,9 @@ async function gs(fn, data){
       case "getBranches": {
         await initFirebase();
         var brSnap = await _db.collection("branches").get();
-        if(brSnap.empty) return {branches:[{id:"willamette",name:"Willamette Valley"},{id:"spokane",name:"Spokane"}]};
         var brDocs = brSnap.docs.map(function(d){ return Object.assign({id:d.id},d.data()); });
+        // Willamette and Spokane are built in: they always show, even when only newer branches have records in the database
+        Object.keys(BRANCHES).forEach(function(k){ if(!brDocs.some(function(x){ return x.id===k; })) brDocs.push({id:k, name:BRANCHES[k].name}); });
         brDocs.sort(function(a,b){ return a.id==="willamette"?-1:b.id==="willamette"?1:a.name.localeCompare(b.name); });
         return {branches: brDocs};
       }
